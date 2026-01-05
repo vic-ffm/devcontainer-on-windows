@@ -87,6 +87,9 @@ declare -r DOCKER_REPO_URL="https://download.docker.com/linux"
 declare -r DOCKER_GPG_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 
 # Docker GPG key SHA256 checksum (defense-in-depth verification)
+# NOTE: This is secondary to fingerprint verification. Update when Docker rotates keys:
+#   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sha256sum
+# Then verify the fingerprint matches DOCKER_GPG_FINGERPRINT before updating.
 declare -r DOCKER_GPG_SHA256="1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570"
 
 # Allowed domains for downloads (security allowlist)
@@ -117,7 +120,7 @@ declare -ri EXIT_USER_CANCELLED=10
 # Required commands for script execution
 declare -ra REQUIRED_COMMANDS=(
   curl apt-get dpkg-query getent id stat mkdir rm mv cp chmod
-  gpg awk grep sed tee sleep flock pgrep uname sha256sum cut
+  gpg awk grep sed tee sleep flock pgrep uname sha256sum cut mktemp
 )
 
 # Packages to install
@@ -354,7 +357,7 @@ validate_url() {
   fi
 }
 
-# File download with TLS 
+# File download with TLS
 secure_download() {
   local -r url="$1"
   local -r output="$2"
@@ -399,6 +402,7 @@ is_wsl2() {
   local version_info
   [[ -f /proc/version ]] || return 1
   version_info=$(< "/proc/version")
+  local -r version_info
   [[ ${version_info} =~ [Mm]icrosoft.*[Ww][Ss][Ll]2|[Ww][Ss][Ll]2.*[Mm]icrosoft ]] && return 0
   [[ ${version_info} =~ [Mm]icrosoft && -d /run/WSL ]] && return 0
   return 1
@@ -414,7 +418,7 @@ execute() {
   "$@"
 }
 
-# APT install 
+# APT install
 apt_install() {
   export DEBIAN_FRONTEND=noninteractive
   export DEBIAN_PRIORITY=critical
@@ -446,6 +450,7 @@ verify_gpg_fingerprint() {
   # Extract fingerprint using gpg
   actual_fp=$(gpg --show-keys --with-fingerprint --with-colons "${keyfile}" 2> /dev/null \
     | awk -F: '/^fpr:/{gsub(/ /,"",$10); print $10; exit}')
+  local -r actual_fp
 
   if [[ -z ${actual_fp} ]]; then
     die "Failed to extract fingerprint from GPG key" "${EXIT_GENERAL_ERROR}"
@@ -461,16 +466,17 @@ verify_gpg_fingerprint() {
   log_success "GPG key fingerprint verified"
 }
 
-# Verify GPG key SHA256 checksum 
+# Verify GPG key SHA256 checksum
 verify_gpg_checksum() {
   local -r keyfile="$1"
   local actual_sha256
 
   actual_sha256=$(sha256sum "${keyfile}" | cut -d' ' -f1)
+  local -r actual_sha256
 
   if [[ -z ${actual_sha256} ]]; then
     log_warn "Could not compute SHA256 checksum of GPG key"
-    return 0 
+    return 0
   fi
 
   if [[ ${actual_sha256} != "${DOCKER_GPG_SHA256}" ]]; then
@@ -568,7 +574,7 @@ register_modified_file() {
 backup_file() {
   local -r file="$1"
   if [[ -f ${file} ]]; then
-    local backup="${file}.bak.${SRANDOM}"
+    local -r backup="${file}.bak.${SRANDOM}"
     cp -a "${file}" "${backup}" 2> /dev/null || true
     register_modified_file "${file}" "${backup}"
     echo "${backup}"
@@ -579,9 +585,12 @@ backup_file() {
 atomic_write() {
   local -r target="$1"
   local -r content="$2"
-  local temp="${target}.tmp.${SRANDOM}"
+  local temp
 
-  # Clean up temp file on function exit 
+  # Create temp file securely with mktemp (atomic creation with O_EXCL)
+  temp=$(mktemp "${target}.tmp.XXXXXX") || die "Failed to create temp file for ${target}" "${EXIT_GENERAL_ERROR}"
+
+  # Clean up temp file on function exit
   trap 'rm -f "${temp}" 2>/dev/null; trap - RETURN' RETURN
 
   # Write to temp file first
@@ -741,7 +750,7 @@ cleanup() {
   # Execute registered cleanup actions in reverse order (LIFO)
   local -i i
   for ((i = ${#CLEANUP_ACTIONS[@]} - 1; i >= 0; i--)); do
-    local action="${CLEANUP_ACTIONS[i]}"
+    local -r action="${CLEANUP_ACTIONS[i]}"
     log_debug "Executing cleanup action: ${action}"
     if declare -F "${action}" &> /dev/null; then
       "${action}" 2> /dev/null || true
@@ -913,7 +922,7 @@ detect_distribution() {
       ;;
     *)
       # Check derivatives via ID_LIKE
-      local id_like="${ID_LIKE:-}"
+      local -r id_like="${ID_LIKE:-}"
       if [[ ${id_like} == *ubuntu* ]]; then
         DISTRO_BASE="ubuntu"
         log_warn "Detected ${DISTRO_ID@Q} (Ubuntu-derivative)"
@@ -1061,11 +1070,11 @@ fetch_available_codenames() {
     return 1
   fi
 
-  # Output codenames 
+  # Output codenames
   printf '%s\n' "${codenames[@]}"
 }
 
-# Check if a codename exists in Docker repo 
+# Check if a codename exists in Docker repo
 codename_exists_in_repo() {
   local -r codename="$1"
   local -r test_url="${DOCKER_REPO_URL}/${DISTRO_BASE}/dists/${codename}/Release"
@@ -1437,6 +1446,7 @@ purge_docker_data() {
   if getent group docker &> /dev/null; then
     local member_list
     member_list=$(getent group docker | cut -d: -f4)
+    local -r member_list
     if [[ -z ${member_list} ]]; then
       log_info "Removing empty docker group..."
       # shellcheck disable=SC2310  # Intentional: allow groupdel to fail
