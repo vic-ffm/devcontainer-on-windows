@@ -8,7 +8,8 @@
 #   Non-interactive and idempotent.
 #
 # REQUIREMENTS:
-#   Bash 5.2+ (ships with Ubuntu 24.04+, Debian 12+)
+#   Bash 5.2+
+#   Ubuntu 24.04+ or Debian 12+ in WSL2
 #
 # USAGE:
 #   curl -fsSL https://example.com/install-docker-wsl2.sh | sudo bash
@@ -45,7 +46,7 @@
 # shellcheck enable=check-extra-masked-returns
 
 #-------------------------------------------------------------------------------
-# Bash Version Check 
+# Bash Version Check
 #-------------------------------------------------------------------------------
 if ((BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 2))); then
   printf 'Error: This script requires Bash 5.2+. Current: %s\n' "${BASH_VERSION}" >&2
@@ -55,20 +56,23 @@ fi
 #-------------------------------------------------------------------------------
 # Strict Mode & Safety Settings (Bash 5.2+)
 #-------------------------------------------------------------------------------
-set -o errexit        # Exit on any command failure
-set -o errtrace       # ERR trap inherited by functions/subshells
-set -o nounset        # Exit on undefined variable
-set -o pipefail       # Catch errors in pipelines
+set -o errexit             # Exit on any command failure
+set -o errtrace            # ERR trap inherited by functions/subshells
+set -o nounset             # Exit on undefined variable
+set -o pipefail            # Catch errors in pipelines
 shopt -s extglob           # Extended pattern matching
 shopt -s globskipdots      # Never match . or .. in globs (Bash 5.2+)
 shopt -s inherit_errexit   # Command substitutions inherit errexit (Bash 4.4+)
-shopt -s assoc_expand_once # Prevent double associative array subscript evaluation (Bash 5.2+)
+shopt -s assoc_expand_once # Prevent double array subscript evaluation (Bash 5.0+)
 
 # Enable debug tracing if TRACE=1
 [[ ${TRACE:-0} == 1 ]] && set -o xtrace
 
+# Command-level tracing (set via --trace-commands)
+declare TRACE_COMMANDS=false
+
 #-------------------------------------------------------------------------------
-# Constants 
+# Constants
 #-------------------------------------------------------------------------------
 declare -r SCRIPT_NAME="${0##*/}"
 declare -r SCRIPT_VERSION="2.1.0"
@@ -79,12 +83,42 @@ declare -r LOCK_FILE="/var/lock/docker-wsl2-install.lock"
 declare -r DOCKER_GPG_URL="https://download.docker.com/linux"
 declare -r DOCKER_REPO_URL="https://download.docker.com/linux"
 
-# Docker GPG key fingerprint for verification 
+# Docker GPG key fingerprint for verification
 declare -r DOCKER_GPG_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+
+# Docker GPG key SHA256 checksum (defense-in-depth verification)
+declare -r DOCKER_GPG_SHA256="1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570"
+
+# Allowed domains for downloads (security allowlist)
+declare -ra ALLOWED_DOWNLOAD_DOMAINS=(download.docker.com)
 
 # Network retry configuration
 declare -ri MAX_RETRIES=5
 declare -ri RETRY_DELAY_BASE=2
+
+# Lock timeout (seconds) - prevents deadlocks from stuck processes
+declare -ri LOCK_TIMEOUT=300
+
+# Structured exit codes for better error handling
+# shellcheck disable=SC2034  # EXIT_SUCCESS defined for completeness/documentation
+declare -ri EXIT_SUCCESS=0
+declare -ri EXIT_GENERAL_ERROR=1
+declare -ri EXIT_LOCK_FAILED=2
+declare -ri EXIT_INVALID_ARGS=3
+declare -ri EXIT_ROOT_REQUIRED=4
+declare -ri EXIT_NOT_WSL2=5
+declare -ri EXIT_UNSUPPORTED_DISTRO=6
+declare -ri EXIT_NETWORK_ERROR=7
+declare -ri EXIT_DISK_SPACE=8
+declare -ri EXIT_INSTALL_FAILED=9
+# shellcheck disable=SC2034  # EXIT_USER_CANCELLED defined for completeness/documentation
+declare -ri EXIT_USER_CANCELLED=10
+
+# Required commands for script execution
+declare -ra REQUIRED_COMMANDS=(
+  curl apt-get dpkg-query getent id stat mkdir rm mv cp chmod
+  gpg awk grep sed tee sleep flock pgrep uname sha256sum cut
+)
 
 # Packages to install
 declare -ra DOCKER_PACKAGES=(
@@ -150,12 +184,12 @@ declare EFFECTIVE_CODENAME=""
 declare -i CLEANUP_IN_PROGRESS=0
 declare -i SIGNAL_RECEIVED=0
 declare RECEIVED_SIGNAL=""
-declare -a CLEANUP_ACTIONS=() 
-declare -A CREATED_FILES=()   
-declare -A MODIFIED_FILES=()  
+declare -a CLEANUP_ACTIONS=()
+declare -A CREATED_FILES=()
+declare -A MODIFIED_FILES=()
 
 #-------------------------------------------------------------------------------
-# Terminal Colors 
+# Terminal Colors
 #-------------------------------------------------------------------------------
 declare -A COLORS
 if [[ -t 1 && ${TERM:-dumb} != dumb ]]; then
@@ -173,7 +207,7 @@ else
 fi
 
 #-------------------------------------------------------------------------------
-# Logging Functions 
+# Logging Functions
 #-------------------------------------------------------------------------------
 _log() {
   local -r level="$1" color="$2" msg="$3"
@@ -200,7 +234,7 @@ _syslog() {
   # shellcheck disable=SC2310  # Intentional: capture result in variable
   has_command logger && has_logger=true
   if [[ ${SYSLOG} == true && ${has_logger} == true ]]; then
-    logger -t "${SCRIPT_NAME}" -p "user.${level,,}" "${msg}" 2>/dev/null || true
+    logger -t "${SCRIPT_NAME}" -p "user.${level,,}" "${msg}" 2> /dev/null || true
   fi
 }
 
@@ -246,7 +280,7 @@ confirm_action() {
   [[ ${response,,} =~ ^(y|yes)$ ]]
 }
 
-# Retry with exponential backoff
+# Retry
 retry_with_backoff() {
   local -ri max_attempts="$1"
   local -i delay="$2"
@@ -285,16 +319,86 @@ retry_with_backoff() {
   done
 }
 
-# Check if command exists 
+# Check if command exists
 has_command() {
-  command -v "$1" &>/dev/null
+  command -v "$1" &> /dev/null
+}
+
+# Validate URL format and domain allowlist
+validate_url() {
+  local -r url="$1"
+  local -r pattern='^https://[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+(/[-a-zA-Z0-9_.~%/]*)?$'
+
+  # Validate URL format
+  if [[ ! ${url} =~ ${pattern} ]]; then
+    die "Invalid URL format: ${url}" "${EXIT_GENERAL_ERROR:-1}"
+  fi
+
+  # Extract domain from URL
+  local domain
+  domain="${url#https://}"
+  domain="${domain%%/*}"
+
+  # Validate against allowed domains
+  local allowed=false
+  local d
+  for d in "${ALLOWED_DOWNLOAD_DOMAINS[@]}"; do
+    if [[ ${domain} == "${d}" ]]; then
+      allowed=true
+      break
+    fi
+  done
+
+  if [[ ${allowed} != true ]]; then
+    die "URL domain not in allowlist: ${domain}" "${EXIT_GENERAL_ERROR:-1}"
+  fi
+}
+
+# File download with TLS 
+secure_download() {
+  local -r url="$1"
+  local -r output="$2"
+  local -ri max_size="${3:-10485760}" # 10MB default
+
+  # Validate URL before downloading
+  validate_url "${url}"
+
+  curl -fsSL \
+    --proto '=https' \
+    --tlsv1.2 \
+    --connect-timeout 10 \
+    --max-time 60 \
+    --retry 3 \
+    --retry-connrefused \
+    --max-filesize "${max_size}" \
+    -o "${output}" \
+    "${url}"
+}
+
+# Content fetch (returns content to stdout)
+secure_fetch() {
+  local -r url="$1"
+  local -ri max_size="${2:-10485760}" # 10MB default
+
+  # Validate URL before fetching
+  validate_url "${url}"
+
+  curl -fsSL \
+    --proto '=https' \
+    --tlsv1.2 \
+    --connect-timeout 10 \
+    --max-time 60 \
+    --retry 3 \
+    --retry-connrefused \
+    --max-filesize "${max_size}" \
+    "${url}"
 }
 
 # Check if running in WSL2
 is_wsl2() {
   local version_info
   [[ -f /proc/version ]] || return 1
-  version_info=$(<"/proc/version")
+  version_info=$(< "/proc/version")
   [[ ${version_info} =~ [Mm]icrosoft.*[Ww][Ss][Ll]2|[Ww][Ss][Ll]2.*[Mm]icrosoft ]] && return 0
   [[ ${version_info} =~ [Mm]icrosoft && -d /run/WSL ]] && return 0
   return 1
@@ -310,11 +414,11 @@ execute() {
   "$@"
 }
 
-# APT install with production-ready defaults
+# APT install 
 apt_install() {
   export DEBIAN_FRONTEND=noninteractive
   export DEBIAN_PRIORITY=critical
-  export NEEDRESTART_MODE=a  # Auto-restart services without prompting
+  export NEEDRESTART_MODE=a # Auto-restart services without prompting
 
   apt-get install -y -qq \
     -o Dpkg::Options::="--force-confdef" \
@@ -325,13 +429,13 @@ apt_install() {
 
 # Check if package is installed
 is_installed() {
-  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "^install ok installed$"
+  dpkg-query -W -f='${Status}' "$1" 2> /dev/null | grep -q "^install ok installed$"
 }
 
 # Check if user is in group
 user_in_group() {
   local -r user="$1" group="$2"
-  id -nG "${user}" 2>/dev/null | tr ' ' '\n' | grep -qx "${group}"
+  id -nG "${user}" 2> /dev/null | tr ' ' '\n' | grep -qx "${group}"
 }
 
 # Verify GPG key fingerprint matches Docker's official key
@@ -340,29 +444,74 @@ verify_gpg_fingerprint() {
   local actual_fp
 
   # Extract fingerprint using gpg
-  actual_fp=$(gpg --show-keys --with-fingerprint --with-colons "${keyfile}" 2>/dev/null |
-    awk -F: '/^fpr:/{gsub(/ /,"",$10); print $10; exit}')
+  actual_fp=$(gpg --show-keys --with-fingerprint --with-colons "${keyfile}" 2> /dev/null \
+    | awk -F: '/^fpr:/{gsub(/ /,"",$10); print $10; exit}')
 
   if [[ -z ${actual_fp} ]]; then
-    die "Failed to extract fingerprint from GPG key" 1
+    die "Failed to extract fingerprint from GPG key" "${EXIT_GENERAL_ERROR}"
   fi
 
   if [[ ${actual_fp^^} != "${DOCKER_GPG_FINGERPRINT^^}" ]]; then
     log_error "GPG key fingerprint mismatch!"
     log_error "Expected: ${DOCKER_GPG_FINGERPRINT}"
     log_error "Got:      ${actual_fp}"
-    die "Security verification failed - GPG key may be compromised" 1
+    die "Security verification failed - GPG key may be compromised" "${EXIT_GENERAL_ERROR}"
   fi
 
   log_success "GPG key fingerprint verified"
+}
+
+# Verify GPG key SHA256 checksum 
+verify_gpg_checksum() {
+  local -r keyfile="$1"
+  local actual_sha256
+
+  actual_sha256=$(sha256sum "${keyfile}" | cut -d' ' -f1)
+
+  if [[ -z ${actual_sha256} ]]; then
+    log_warn "Could not compute SHA256 checksum of GPG key"
+    return 0 
+  fi
+
+  if [[ ${actual_sha256} != "${DOCKER_GPG_SHA256}" ]]; then
+    log_warn "GPG key SHA256 mismatch (key may have been legitimately updated)"
+    log_warn "Expected: ${DOCKER_GPG_SHA256}"
+    log_warn "Got:      ${actual_sha256}"
+    # Don't fail - fingerprint verification is authoritative
+    return 0
+  fi
+
+  log_debug "GPG key SHA256 checksum verified"
 }
 
 # Validate username format
 validate_username() {
   local -r user="$1"
   if [[ ! ${user} =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
-    die "Invalid username format: '${user}'. Must be POSIX-compliant (lowercase, start with letter/underscore, max 32 chars)" 1
+    die "Invalid username format: '${user}'. Must be POSIX-compliant (lowercase, start with letter/underscore, max 32 chars)" "${EXIT_INVALID_ARGS:-1}"
   fi
+}
+
+# Validate required commands are available (fail-fast)
+validate_required_commands() {
+  log_info "Validating required commands..."
+
+  local -a missing=()
+  local cmd
+
+  for cmd in "${REQUIRED_COMMANDS[@]}"; do
+    # shellcheck disable=SC2310  # Intentional: capture result in conditional
+    if ! has_command "${cmd}"; then
+      missing+=("${cmd}")
+    fi
+  done
+
+  if ((${#missing[@]} > 0)); then
+    log_error "Missing required command(s): ${missing[*]}"
+    die "Install missing commands and try again" "${EXIT_GENERAL_ERROR:-1}"
+  fi
+
+  log_success "All required commands available"
 }
 
 #-------------------------------------------------------------------------------
@@ -374,10 +523,10 @@ acquire_lock() {
   mkdir -p "${LOCK_FILE%/*}"
 
   # Open lock file
-  exec {LOCK_FD}>"${LOCK_FILE}"
+  exec {LOCK_FD}> "${LOCK_FILE}"
 
-  if ! flock -n "${LOCK_FD}"; then
-    die "Another instance of ${SCRIPT_NAME} is already running" 2
+  if ! flock -w "${LOCK_TIMEOUT}" "${LOCK_FD}"; then
+    die "Could not acquire lock within ${LOCK_TIMEOUT}s. Another instance may be stuck." "${EXIT_LOCK_FAILED:-2}"
   fi
 
   # Write PID for debugging
@@ -390,7 +539,7 @@ acquire_lock() {
 
 release_lock() {
   if [[ -v LOCK_FD ]]; then
-    exec {LOCK_FD}>&- 2>/dev/null || true
+    exec {LOCK_FD}>&- 2> /dev/null || true
     log_debug "Lock released"
   fi
 }
@@ -420,17 +569,20 @@ backup_file() {
   local -r file="$1"
   if [[ -f ${file} ]]; then
     local backup="${file}.bak.${SRANDOM}"
-    cp -a "${file}" "${backup}" 2>/dev/null || true
+    cp -a "${file}" "${backup}" 2> /dev/null || true
     register_modified_file "${file}" "${backup}"
     echo "${backup}"
   fi
 }
 
-# Atomic file write 
+# Atomic file write
 atomic_write() {
   local -r target="$1"
   local -r content="$2"
-  local -r temp="${target}.tmp.${SRANDOM}"
+  local temp="${target}.tmp.${SRANDOM}"
+
+  # Clean up temp file on function exit 
+  trap 'rm -f "${temp}" 2>/dev/null; trap - RETURN' RETURN
 
   # Write to temp file first
   printf '%s\n' "${content}" > "${temp}"
@@ -438,7 +590,8 @@ atomic_write() {
   # Atomic rename
   mv -f "${temp}" "${target}"
 
-  # Register for rollback tracking
+  # Clear trap and register for rollback tracking
+  trap - RETURN
   register_created_file "${target}"
 }
 
@@ -452,7 +605,7 @@ declare -rA SIGNAL_INFO=(
   [QUIT]="3:Quit:graceful"
   [TERM]="15:Terminated:graceful"
 
-  # Program error signals 
+  # Program error signals
   [ILL]="4:Illegal instruction:fatal"
   [TRAP]="5:Trace/breakpoint trap:fatal"
   [ABRT]="6:Aborted:fatal"
@@ -480,7 +633,7 @@ signal_handler() {
 
   # Parse signal info
   if [[ -v SIGNAL_INFO[${sig_name}] ]]; then
-    IFS=':' read -r sig_num sig_desc sig_type <<<"${SIGNAL_INFO[${sig_name}]}"
+    IFS=':' read -r sig_num sig_desc sig_type <<< "${SIGNAL_INFO[${sig_name}]}"
   fi
 
   local -ri exit_code=$((128 + sig_num))
@@ -546,18 +699,18 @@ error_handler() {
 cleanup_processes() {
   # Get list of child processes
   local -a child_pids
-  mapfile -t child_pids < <(pgrep -P $$ 2>/dev/null || true)
+  mapfile -t child_pids < <(pgrep -P $$ 2> /dev/null || true)
 
   if ((${#child_pids[@]} > 0)); then
     log_debug "Terminating ${#child_pids[@]} child process(es)"
     for pid in "${child_pids[@]}"; do
-      kill -TERM "${pid}" 2>/dev/null || true
+      kill -TERM "${pid}" 2> /dev/null || true
     done
     # Brief wait for graceful termination
     sleep 0.5
     # Force kill any remaining
     for pid in "${child_pids[@]}"; do
-      kill -KILL "${pid}" 2>/dev/null || true
+      kill -KILL "${pid}" 2> /dev/null || true
     done
   fi
 }
@@ -590,8 +743,8 @@ cleanup() {
   for ((i = ${#CLEANUP_ACTIONS[@]} - 1; i >= 0; i--)); do
     local action="${CLEANUP_ACTIONS[i]}"
     log_debug "Executing cleanup action: ${action}"
-    if declare -F "${action}" &>/dev/null; then
-      "${action}" 2>/dev/null || true
+    if declare -F "${action}" &> /dev/null; then
+      "${action}" 2> /dev/null || true
     else
       log_warn "Unknown cleanup action skipped: ${action}"
     fi
@@ -604,7 +757,7 @@ cleanup() {
     for file in "${!CREATED_FILES[@]}"; do
       if [[ -f ${file} ]]; then
         log_debug "Removing created file: ${file}"
-        rm -f "${file}" 2>/dev/null || true
+        rm -f "${file}" 2> /dev/null || true
       fi
     done
 
@@ -613,7 +766,7 @@ cleanup() {
       local backup="${MODIFIED_FILES[${file}]}"
       if [[ -f ${backup} ]]; then
         log_debug "Restoring ${file} from ${backup}"
-        mv -f "${backup}" "${file}" 2>/dev/null || true
+        mv -f "${backup}" "${file}" 2> /dev/null || true
       fi
     done
 
@@ -623,15 +776,15 @@ cleanup() {
     has_command apt-get && has_apt=true
     if [[ ${has_apt} == true ]]; then
       log_debug "Cleaning apt state..."
-      apt-get clean 2>/dev/null || true
-      rm -f /var/lib/apt/lists/lock 2>/dev/null || true
-      rm -f /var/lib/dpkg/lock* 2>/dev/null || true
+      apt-get clean 2> /dev/null || true
+      rm -f /var/lib/apt/lists/lock 2> /dev/null || true
+      rm -f /var/lib/dpkg/lock* 2> /dev/null || true
     fi
   else
     # Success: remove backup files
     for file in "${!MODIFIED_FILES[@]}"; do
       local backup="${MODIFIED_FILES[${file}]}"
-      rm -f "${backup}" 2>/dev/null || true
+      rm -f "${backup}" 2> /dev/null || true
     done
   fi
 
@@ -646,7 +799,7 @@ cleanup() {
 }
 
 #-------------------------------------------------------------------------------
-# Setup All Signal Handlers
+# Setup Signal Handlers
 #-------------------------------------------------------------------------------
 setup_signal_handlers() {
   # EXIT trap - always runs, handles all cleanup
@@ -662,40 +815,85 @@ setup_signal_handlers() {
   trap 'signal_handler TERM' TERM # 15 - Termination request
 
   # Program error signals (fatal - attempt cleanup)
-  trap 'signal_handler ILL' ILL   # 4  - Illegal instruction
-  trap 'signal_handler TRAP' TRAP # 5  - Trace/breakpoint trap
-  trap 'signal_handler ABRT' ABRT # 6  - Abort
-  trap 'signal_handler BUS' BUS   # 7  - Bus error
-  trap 'signal_handler FPE' FPE   # 8  - Floating point exception
-  trap 'signal_handler SEGV' SEGV # 11 - Segmentation fault
-  trap 'signal_handler SYS' SYS   # 31 - Bad system call
-  trap 'signal_handler STKFLT' STKFLT 2>/dev/null || true # 16 - Stack fault
-  # SIGEMT is only available on Alpha/SPARC/MIPS
-  # Attempt to trap it but ignore failure
-  trap 'signal_handler EMT' EMT 2>/dev/null || true
-  trap 'signal_handler IOT' IOT 2>/dev/null || true
+  trap 'signal_handler ILL' ILL                            # 4  - Illegal instruction
+  trap 'signal_handler TRAP' TRAP                          # 5  - Trace/breakpoint trap
+  trap 'signal_handler ABRT' ABRT                          # 6  - Abort
+  trap 'signal_handler BUS' BUS                            # 7  - Bus error
+  trap 'signal_handler FPE' FPE                            # 8  - Floating point exception
+  trap 'signal_handler SEGV' SEGV                          # 11 - Segmentation fault
+  trap 'signal_handler SYS' SYS                            # 31 - Bad system call
+  trap 'signal_handler STKFLT' STKFLT 2> /dev/null || true # 16 - Stack fault
+  # These are not widel available. Attempt to trap but ignore failure
+  trap 'signal_handler EMT' EMT 2> /dev/null || true
+  trap 'signal_handler IOT' IOT 2> /dev/null || true
 
   log_debug "Signal handlers installed"
+}
+
+#-------------------------------------------------------------------------------
+# Debug Tracing (--trace-commands)
+#-------------------------------------------------------------------------------
+setup_debug_tracing() {
+  if [[ ${TRACE_COMMANDS} == true ]]; then
+    trap '_trace_command "${BASH_COMMAND}" "${LINENO}" "${FUNCNAME[0]:-main}"' DEBUG
+    log_debug "Command tracing enabled"
+  fi
+}
+
+_trace_command() {
+  local -r cmd="$1" line="$2" func="$3"
+  # Skip internal tracing functions to avoid recursion
+  [[ ${cmd} == _trace_command* || ${cmd} == log_* ]] && return
+  log_debug "[${func}:${line}] ${cmd}"
+}
+
+#-------------------------------------------------------------------------------
+# Step Markers (Idempotency Support)
+#-------------------------------------------------------------------------------
+declare -r STEP_MARKER_DIR="/var/lib/docker-wsl2-install"
+
+# Check if a step was previously completed
+step_completed() {
+  local -r step_name="$1"
+  [[ -f "${STEP_MARKER_DIR}/.step_${step_name}" ]]
+}
+
+# Mark a step as completed
+mark_step_complete() {
+  local -r step_name="$1"
+  if [[ ${DRY_RUN} != true ]]; then
+    mkdir -p "${STEP_MARKER_DIR}"
+    printf '%s\n' "$(printf '%(%FT%T)T' "${EPOCHSECONDS}")" > "${STEP_MARKER_DIR}/.step_${step_name}"
+  fi
+  log_debug "Step '${step_name}' marked complete"
+}
+
+# Clear all step markers (for fresh install)
+clear_step_markers() {
+  if [[ -d ${STEP_MARKER_DIR} ]]; then
+    rm -f "${STEP_MARKER_DIR}"/.step_* 2> /dev/null || true
+    log_debug "Step markers cleared"
+  fi
 }
 
 #-------------------------------------------------------------------------------
 # Validation Functions
 #-------------------------------------------------------------------------------
 check_root() {
-  ((EUID == 0)) || die "This script must be run as root. Use: sudo ${SCRIPT_NAME}" 1
+  ((EUID == 0)) || die "This script must be run as root. Use: sudo ${SCRIPT_NAME}" "${EXIT_ROOT_REQUIRED}"
 }
 
 check_wsl2() {
   log_info "Checking WSL2 environment..."
   # shellcheck disable=SC2310  # Intentional: die terminates on failure
-  is_wsl2 || die "This script requires WSL2. Detected non-WSL2 system." 1
+  is_wsl2 || die "This script requires WSL2. Detected non-WSL2 system." "${EXIT_NOT_WSL2}"
   log_success "WSL2 environment confirmed"
 }
 
 detect_distribution() {
   log_info "Detecting Linux distribution..."
 
-  [[ -f /etc/os-release ]] || die "Cannot detect distribution: /etc/os-release not found" 1
+  [[ -f /etc/os-release ]] || die "Cannot detect distribution: /etc/os-release not found" "${EXIT_UNSUPPORTED_DISTRO}"
 
   # shellcheck source=/dev/null
   source /etc/os-release
@@ -723,12 +921,12 @@ detect_distribution() {
         DISTRO_BASE="debian"
         log_warn "Detected ${DISTRO_ID@Q} (Debian-derivative)"
       else
-        die "Unsupported distribution: ${DISTRO_ID}. Requires Ubuntu/Debian-based system." 1
+        die "Unsupported distribution: ${DISTRO_ID}. Requires Ubuntu/Debian-based system." "${EXIT_UNSUPPORTED_DISTRO}"
       fi
       ;;
   esac
 
-  [[ -n ${DISTRO_CODENAME} ]] || die "Cannot detect codename (VERSION_CODENAME not set)" 1
+  [[ -n ${DISTRO_CODENAME} ]] || die "Cannot detect codename (VERSION_CODENAME not set)" "${EXIT_UNSUPPORTED_DISTRO}"
 
   log_success "Detected: ${DISTRO_ID} ${DISTRO_CODENAME} (${DISTRO_BASE}-based)"
 }
@@ -737,7 +935,7 @@ detect_architecture() {
   log_info "Detecting system architecture..."
 
   local machine
-  machine="$(uname -m)" || die "Failed to detect architecture" 1
+  machine="$(uname -m)" || die "Failed to detect architecture" "${EXIT_GENERAL_ERROR}"
   local -r machine
 
   case "${machine}" in
@@ -746,7 +944,7 @@ detect_architecture() {
     armv7l | armhf) ARCH="armhf" ;;
     s390x) ARCH="s390x" ;;
     ppc64le) ARCH="ppc64le" ;;
-    *) die "Unsupported architecture: ${machine}" 1 ;;
+    *) die "Unsupported architecture: ${machine}" "${EXIT_UNSUPPORTED_DISTRO}" ;;
   esac
 
   log_success "Architecture: ${ARCH}"
@@ -764,7 +962,7 @@ validate_user() {
     return 0
   fi
 
-  id "${DOCKER_USER}" &>/dev/null || die "User '${DOCKER_USER}' does not exist" 1
+  id "${DOCKER_USER}" &> /dev/null || die "User '${DOCKER_USER}' does not exist" "${EXIT_INVALID_ARGS}"
 
   log_success "Target user: ${DOCKER_USER}"
 }
@@ -782,23 +980,29 @@ check_network() {
 
   local endpoint
   for endpoint in "${test_endpoints[@]}"; do
-    if curl -fsSL --connect-timeout 5 --max-time 10 -o /dev/null "${endpoint}" 2>/dev/null; then
+    if curl -fsSL \
+      --proto '=https' \
+      --tlsv1.2 \
+      --connect-timeout 5 \
+      --max-time 10 \
+      -o /dev/null \
+      "${endpoint}" 2> /dev/null; then
       log_success "Network connectivity confirmed"
       return 0
     fi
   done
 
-  die "No network connectivity. Please check your internet connection." 1
+  die "No network connectivity. Please check your internet connection." "${EXIT_NETWORK_ERROR:-1}"
 }
 
 check_disk_space() {
   log_info "Checking available disk space..."
   local -ri required_mb=500
   local -i available_mb
-  available_mb=$(df -BM /var 2>/dev/null | awk 'NR==2 {print int($4)}') || available_mb=0
+  available_mb=$(df -BM /var 2> /dev/null | awk 'NR==2 {print int($4)}') || available_mb=0
 
   if ((available_mb < required_mb)); then
-    die "Insufficient disk space: ${available_mb}MB available, ${required_mb}MB required" 1
+    die "Insufficient disk space: ${available_mb}MB available, ${required_mb}MB required" "${EXIT_DISK_SPACE}"
   fi
   log_success "Disk space OK: ${available_mb}MB available"
 }
@@ -806,8 +1010,8 @@ check_disk_space() {
 check_dns() {
   log_info "Checking DNS resolution..."
   local -r test_host="download.docker.com"
-  if ! getent hosts "${test_host}" &>/dev/null; then
-    die "DNS resolution failed for ${test_host}. Check your DNS settings." 1
+  if ! getent hosts "${test_host}" &> /dev/null; then
+    die "DNS resolution failed for ${test_host}. Check your DNS settings." "${EXIT_NETWORK_ERROR}"
   fi
   log_success "DNS resolution OK"
 }
@@ -816,7 +1020,7 @@ check_file_descriptors() {
   log_info "Checking file descriptor limits..."
   local -ri required_fds=256
   local -i max_fds
-  max_fds=$(ulimit -n 2>/dev/null) || max_fds=0
+  max_fds=$(ulimit -n 2> /dev/null) || max_fds=0
 
   if ((max_fds > 0 && max_fds < required_fds)); then
     log_warn "Low file descriptor limit: ${max_fds} (recommended: ${required_fds}+)"
@@ -828,11 +1032,57 @@ check_file_descriptors() {
 #-------------------------------------------------------------------------------
 # Repository Functions
 #-------------------------------------------------------------------------------
+
+# Parses HTML directory listing from https://download.docker.com/linux/{distro}/dists/
+# Returns codenames on stdout, one per line
+fetch_available_codenames() {
+  local -r dists_url="${DOCKER_REPO_URL}/${DISTRO_BASE}/dists/"
+  local html_content
+  local -a codenames
+
+  # Fetch directory listing with TLS hardening (no need for validate_url - internal function)
+  html_content=$(curl -fsSL \
+    --proto '=https' \
+    --tlsv1.2 \
+    --connect-timeout 10 \
+    --max-time 30 \
+    --max-filesize 1048576 \
+    "${dists_url}" 2> /dev/null) || return 1
+
+  # shellcheck disable=SC2312  # Pipeline return values intentionally not checked
+  mapfile -t codenames < <(
+    printf '%s' "${html_content}" \
+      | grep -oP 'href="\K[a-z]+(?=/")' \
+      | grep -v -E '^(\.|\.\.)$' \
+      | sort -u
+  )
+
+  if ((${#codenames[@]} == 0)); then
+    return 1
+  fi
+
+  # Output codenames 
+  printf '%s\n' "${codenames[@]}"
+}
+
+# Check if a codename exists in Docker repo 
+codename_exists_in_repo() {
+  local -r codename="$1"
+  local -r test_url="${DOCKER_REPO_URL}/${DISTRO_BASE}/dists/${codename}/Release"
+
+  curl -fsSL \
+    --proto '=https' \
+    --tlsv1.2 \
+    --head \
+    --connect-timeout 5 \
+    --max-time 10 \
+    "${test_url}" &> /dev/null
+}
+
 # Verify Docker repo has packages for codename, find fallback if needed
 resolve_codename() {
-  local test_url="${DOCKER_REPO_URL}/${DISTRO_BASE}/dists/${DISTRO_CODENAME}/Release"
-
-  if curl -fsSL --head --connect-timeout 5 "${test_url}" &>/dev/null; then
+  # shellcheck disable=SC2310  # Intentional: capture result in variable
+  if codename_exists_in_repo "${DISTRO_CODENAME}"; then
     log_debug "Docker repo has packages for ${DISTRO_CODENAME}"
     EFFECTIVE_CODENAME="${DISTRO_CODENAME}"
     return 0
@@ -841,12 +1091,28 @@ resolve_codename() {
   log_warn "Docker repo missing packages for '${DISTRO_CODENAME}'"
   log_info "Finding compatible fallback..."
 
+  local -a available_codenames
+  # shellcheck disable=SC2310,SC2312  # Intentional: allow dynamic fetch to fail gracefully
+  if mapfile -t available_codenames < <(fetch_available_codenames 2> /dev/null) && ((${#available_codenames[@]} > 0)); then
+    log_debug "Found ${#available_codenames[@]} available codenames dynamically"
+    for codename in "${available_codenames[@]}"; do
+      # shellcheck disable=SC2310  # Intentional: capture result in variable
+      if codename_exists_in_repo "${codename}"; then
+        log_warn "Using dynamically resolved fallback: ${codename}"
+        EFFECTIVE_CODENAME="${codename}"
+        return 0
+      fi
+    done
+  fi
+
+  # Fall back to hardcoded codenames
+  log_debug "Falling back to hardcoded codenames"
   local -a fallbacks
-  read -ra fallbacks <<<"${FALLBACK_CODENAMES[${DISTRO_BASE}]}"
+  read -ra fallbacks <<< "${FALLBACK_CODENAMES[${DISTRO_BASE}]}"
 
   for fallback in "${fallbacks[@]}"; do
-    test_url="${DOCKER_REPO_URL}/${DISTRO_BASE}/dists/${fallback}/Release"
-    if curl -fsSL --head --connect-timeout 5 "${test_url}" &>/dev/null; then
+    # shellcheck disable=SC2310  # Intentional: capture result in variable
+    if codename_exists_in_repo "${fallback}"; then
       log_warn "Using fallback: ${fallback}"
       EFFECTIVE_CODENAME="${fallback}"
       return 0
@@ -894,14 +1160,14 @@ check_docker_installation() {
   # Check data directories
   if [[ -d ${DOCKER_DATA_DIR} ]]; then
     local size
-    size=$(du -sh "${DOCKER_DATA_DIR}" 2>/dev/null | cut -f1) || size="unknown"
+    size=$(du -sh "${DOCKER_DATA_DIR}" 2> /dev/null | cut -f1) || size="unknown"
     log_info "  Docker data: ${DOCKER_DATA_DIR} (${size})"
     ((found++))
   fi
 
   if [[ -d ${CONTAINERD_DATA_DIR} ]]; then
     local size
-    size=$(du -sh "${CONTAINERD_DATA_DIR}" 2>/dev/null | cut -f1) || size="unknown"
+    size=$(du -sh "${CONTAINERD_DATA_DIR}" 2> /dev/null | cut -f1) || size="unknown"
     log_info "  Containerd data: ${CONTAINERD_DATA_DIR} (${size})"
     ((found++))
   fi
@@ -931,54 +1197,54 @@ stop_docker_services() {
   log_step "1/5" "Stopping Docker services"
 
   # Check if systemd is running
-  if ! pidof systemd &>/dev/null; then
+  if ! pidof systemd &> /dev/null; then
     log_info "systemd not running - skipping service stop"
     return 0
   fi
 
   # Stop docker service
-  if systemctl is-active --quiet docker.service 2>/dev/null; then
+  if systemctl is-active --quiet docker.service 2> /dev/null; then
     log_info "Stopping docker.service..."
     # shellcheck disable=SC2310  # Intentional: allow failures for service operations
-    execute systemctl stop docker.service 2>/dev/null || true
+    execute systemctl stop docker.service 2> /dev/null || true
     # shellcheck disable=SC2310  # Intentional: allow failures for service operations
-    execute systemctl disable docker.service 2>/dev/null || true
+    execute systemctl disable docker.service 2> /dev/null || true
     log_success "docker.service stopped"
   else
     log_info "docker.service not running"
   fi
 
   # Stop docker.socket if exists
-  if systemctl is-active --quiet docker.socket 2>/dev/null; then
+  if systemctl is-active --quiet docker.socket 2> /dev/null; then
     log_info "Stopping docker.socket..."
     # shellcheck disable=SC2310  # Intentional: allow failures for service operations
-    execute systemctl stop docker.socket 2>/dev/null || true
+    execute systemctl stop docker.socket 2> /dev/null || true
     # shellcheck disable=SC2310  # Intentional: allow failures for service operations
-    execute systemctl disable docker.socket 2>/dev/null || true
+    execute systemctl disable docker.socket 2> /dev/null || true
   fi
 
   # Stop containerd
-  if systemctl is-active --quiet containerd.service 2>/dev/null; then
+  if systemctl is-active --quiet containerd.service 2> /dev/null; then
     log_info "Stopping containerd.service..."
     # shellcheck disable=SC2310  # Intentional: allow failures for service operations
-    execute systemctl stop containerd.service 2>/dev/null || true
+    execute systemctl stop containerd.service 2> /dev/null || true
     # shellcheck disable=SC2310  # Intentional: allow failures for service operations
-    execute systemctl disable containerd.service 2>/dev/null || true
+    execute systemctl disable containerd.service 2> /dev/null || true
     log_success "containerd.service stopped"
   else
     log_info "containerd.service not running"
   fi
 
   # Kill any lingering docker processes
-  if pgrep -x dockerd &>/dev/null; then
+  if pgrep -x dockerd &> /dev/null; then
     log_warn "dockerd still running, sending SIGTERM..."
     # shellcheck disable=SC2310  # Intentional: allow failures for process kill
-    execute pkill -TERM dockerd 2>/dev/null || true
+    execute pkill -TERM dockerd 2> /dev/null || true
     sleep 2
-    if pgrep -x dockerd &>/dev/null; then
+    if pgrep -x dockerd &> /dev/null; then
       log_warn "dockerd still running, sending SIGKILL..."
       # shellcheck disable=SC2310  # Intentional: allow failures for process kill
-      execute pkill -KILL dockerd 2>/dev/null || true
+      execute pkill -KILL dockerd 2> /dev/null || true
     fi
   fi
 
@@ -1058,7 +1324,7 @@ remove_docker_repository() {
   # Update package cache
   log_info "Updating package index..."
   # shellcheck disable=SC2310  # Intentional: allow apt-get update to fail
-  execute apt-get update -qq 2>/dev/null || true
+  execute apt-get update -qq 2> /dev/null || true
 
   log_success "Docker repository removed"
 }
@@ -1078,7 +1344,7 @@ remove_user_from_docker_group() {
   fi
 
   # Check if docker group exists
-  if ! getent group docker &>/dev/null; then
+  if ! getent group docker &> /dev/null; then
     log_info "Docker group doesn't exist"
     return 0
   fi
@@ -1098,7 +1364,7 @@ remove_user_from_docker_group() {
     log_info "[DRY-RUN] Would remove user from docker group"
   else
     # Try gpasswd first, fallback to deluser
-    if gpasswd -d "${DOCKER_USER}" docker 2>/dev/null; then
+    if gpasswd -d "${DOCKER_USER}" docker 2> /dev/null; then
       log_success "User '${DOCKER_USER}' removed from docker group"
     else
       local has_deluser=false
@@ -1106,7 +1372,7 @@ remove_user_from_docker_group() {
       has_command deluser && has_deluser=true
       if [[ ${has_deluser} == true ]]; then
         # shellcheck disable=SC2310  # Intentional: allow deluser to fail
-        execute deluser "${DOCKER_USER}" docker 2>/dev/null || true
+        execute deluser "${DOCKER_USER}" docker 2> /dev/null || true
         log_success "User '${DOCKER_USER}' removed from docker group"
       else
         log_warn "Could not remove user from docker group"
@@ -1115,7 +1381,7 @@ remove_user_from_docker_group() {
   fi
 }
 
-# Purge Docker data directories (only with --purge)
+# Purge Docker data directories (with --purge)
 purge_docker_data() {
   log_step "5/5" "Purging Docker data"
 
@@ -1123,12 +1389,12 @@ purge_docker_data() {
     log_info "Data preservation mode (use --purge to remove data)"
     if [[ -d ${DOCKER_DATA_DIR} ]]; then
       local size
-      size=$(du -sh "${DOCKER_DATA_DIR}" 2>/dev/null | cut -f1) || size="unknown"
+      size=$(du -sh "${DOCKER_DATA_DIR}" 2> /dev/null | cut -f1) || size="unknown"
       log_warn "Preserving: ${DOCKER_DATA_DIR} (${size})"
     fi
     if [[ -d ${CONTAINERD_DATA_DIR} ]]; then
       local size
-      size=$(du -sh "${CONTAINERD_DATA_DIR}" 2>/dev/null | cut -f1) || size="unknown"
+      size=$(du -sh "${CONTAINERD_DATA_DIR}" 2> /dev/null | cut -f1) || size="unknown"
       log_warn "Preserving: ${CONTAINERD_DATA_DIR} (${size})"
     fi
     return 0
@@ -1168,13 +1434,13 @@ purge_docker_data() {
   fi
 
   # Remove docker group if empty
-  if getent group docker &>/dev/null; then
+  if getent group docker &> /dev/null; then
     local member_list
     member_list=$(getent group docker | cut -d: -f4)
     if [[ -z ${member_list} ]]; then
       log_info "Removing empty docker group..."
       # shellcheck disable=SC2310  # Intentional: allow groupdel to fail
-      execute groupdel docker 2>/dev/null || true
+      execute groupdel docker 2> /dev/null || true
     else
       log_info "Preserving docker group (has members)"
     fi
@@ -1311,9 +1577,8 @@ print_removal_summary() {
 
 # Main removal orchestrator
 main_remove() {
-  # Initialize logging
   mkdir -p "${LOG_FILE%/*}"
-  : >"${LOG_FILE}"
+  : > "${LOG_FILE}"
   chmod 644 "${LOG_FILE}"
 
   log_info "═══════════════════════════════════════════════════════════════"
@@ -1335,6 +1600,7 @@ main_remove() {
 
   # Validation
   check_root
+  validate_required_commands
 
   # Check what's installed
   local has_installation=false
@@ -1436,10 +1702,10 @@ setup_docker_repository() {
     log_info "[DRY-RUN] Would download: ${gpg_url}"
   else
     retry_with_backoff "${MAX_RETRIES}" "${RETRY_DELAY_BASE}" \
-      curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 --retry-connrefused \
-        "${gpg_url}" -o "${keyring_file}"
+      secure_download "${gpg_url}" "${keyring_file}" 1048576 # 1MB max for GPG key
     chmod a+r "${keyring_file}"
     verify_gpg_fingerprint "${keyring_file}"
+    verify_gpg_checksum "${keyring_file}"
     register_created_file "${keyring_file}"
   fi
   # Resolve codename
@@ -1483,10 +1749,10 @@ install_docker_engine() {
   has_command docker && has_docker=true
   if [[ ${has_docker} == true ]]; then
     local current_version
-    current_version="$(docker --version 2>/dev/null || echo 'unknown')"
+    current_version="$(docker --version 2> /dev/null || echo 'unknown')"
     log_info "Docker already installed: ${current_version}"
 
-    if docker info &>/dev/null; then
+    if docker info &> /dev/null; then
       log_success "Docker is functional - checking for updates..."
     else
       log_warn "Docker installed but not functional - reinstalling..."
@@ -1508,7 +1774,7 @@ install_docker_engine() {
 
   if [[ ${DRY_RUN} != true ]]; then
     # shellcheck disable=SC2310  # Intentional: die terminates on failure
-    has_command docker || die "Docker installation failed" 1
+    has_command docker || die "Docker installation failed" "${EXIT_INSTALL_FAILED}"
     local docker_ver
     docker_ver="$(docker --version)" || docker_ver="unknown"
     log_success "Docker installed: ${docker_ver}"
@@ -1535,7 +1801,7 @@ configure_iptables() {
 
   # Check current setting
   local current
-  current="$(update-alternatives --query iptables 2>/dev/null | awk '/^Value:/{print $2}')" || true
+  current="$(update-alternatives --query iptables 2> /dev/null | awk '/^Value:/{print $2}')" || true
 
   if [[ ${current} == *iptables-legacy* ]]; then
     log_success "iptables already set to legacy mode"
@@ -1543,16 +1809,16 @@ configure_iptables() {
   fi
 
   # Check if legacy alternative exists
-  if ! update-alternatives --list iptables 2>/dev/null | grep -q iptables-legacy; then
+  if ! update-alternatives --list iptables 2> /dev/null | grep -q iptables-legacy; then
     log_warn "iptables-legacy not available"
     return 0
   fi
 
   log_info "Setting iptables to legacy mode..."
   # shellcheck disable=SC2310  # Intentional: allow failures for optional setting
-  execute update-alternatives --set iptables /usr/sbin/iptables-legacy 2>/dev/null || true
+  execute update-alternatives --set iptables /usr/sbin/iptables-legacy 2> /dev/null || true
   # shellcheck disable=SC2310  # Intentional: allow failures for optional setting
-  execute update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null || true
+  execute update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2> /dev/null || true
 
   log_success "iptables configured"
 }
@@ -1566,7 +1832,7 @@ configure_user_group() {
   fi
 
   # Ensure docker group exists
-  getent group docker &>/dev/null || execute groupadd docker
+  getent group docker &> /dev/null || execute groupadd docker
 
   # Check if already in group
   local already_in_group=false
@@ -1590,7 +1856,7 @@ configure_systemd() {
   local -r wsl_conf="/etc/wsl.conf"
 
   # Check if systemd already enabled
-  if [[ -f ${wsl_conf} ]] && grep -qE '^\s*systemd\s*=\s*true' "${wsl_conf}" 2>/dev/null; then
+  if [[ -f ${wsl_conf} ]] && grep -qE '^\s*systemd\s*=\s*true' "${wsl_conf}" 2> /dev/null; then
     log_success "systemd already enabled"
   else
     log_info "Enabling systemd in WSL..."
@@ -1609,10 +1875,10 @@ configure_systemd() {
             sed -i 's/^\s*systemd\s*=.*/systemd=true/' "${wsl_conf}"
           fi
         else
-          printf '\n[boot]\nsystemd=true\n' >>"${wsl_conf}"
+          printf '\n[boot]\nsystemd=true\n' >> "${wsl_conf}"
         fi
       else
-        printf '[boot]\nsystemd=true\n' >"${wsl_conf}"
+        printf '[boot]\nsystemd=true\n' > "${wsl_conf}"
         register_created_file "${wsl_conf}"
       fi
       log_success "systemd enabled"
@@ -1621,12 +1887,12 @@ configure_systemd() {
   fi
 
   # Start Docker if systemd running
-  if [[ ${DRY_RUN} != true ]] && pidof systemd &>/dev/null; then
+  if [[ ${DRY_RUN} != true ]] && pidof systemd &> /dev/null; then
     log_info "Starting Docker service..."
     # shellcheck disable=SC2310  # Intentional: allow failures for service start
-    execute systemctl enable --now docker.service 2>/dev/null || true
+    execute systemctl enable --now docker.service 2> /dev/null || true
     # shellcheck disable=SC2310  # Intentional: allow failures for service start
-    execute systemctl enable containerd.service 2>/dev/null || true
+    execute systemctl enable containerd.service 2> /dev/null || true
     log_success "Docker service started"
   else
     log_info "systemd not running - Docker starts after WSL restart"
@@ -1662,7 +1928,7 @@ verify_installation() {
   fi
 
   # Docker Compose
-  if docker compose version &>/dev/null; then
+  if docker compose version &> /dev/null; then
     local compose_ver
     compose_ver="$(docker compose version --short)" || compose_ver="unknown"
     log_success "Compose: ${compose_ver}"
@@ -1671,11 +1937,11 @@ verify_installation() {
   fi
 
   # Docker daemon
-  if docker info &>/dev/null; then
+  if docker info &> /dev/null; then
     log_success "Docker daemon running"
 
     log_info "Running hello-world test..."
-    if docker run --rm hello-world &>/dev/null; then
+    if docker run --rm hello-world &> /dev/null; then
       log_success "hello-world test passed"
     else
       log_warn "hello-world failed (may need WSL restart)"
@@ -1685,16 +1951,16 @@ verify_installation() {
   fi
 
   # systemd status
-  if pidof systemd &>/dev/null; then
+  if pidof systemd &> /dev/null; then
     local status
-    status="$(systemctl is-active docker 2>/dev/null || echo 'unknown')"
+    status="$(systemctl is-active docker 2> /dev/null || echo 'unknown')"
     log_info "Docker service: ${status}"
   fi
 
   # Docker socket permissions
   if [[ -S /var/run/docker.sock ]]; then
     local sock_perms
-    sock_perms=$(stat -c '%a' /var/run/docker.sock 2>/dev/null || echo 'unknown')
+    sock_perms=$(stat -c '%a' /var/run/docker.sock 2> /dev/null || echo 'unknown')
     if [[ ${sock_perms} == "660" ]]; then
       log_success "Docker socket permissions: ${sock_perms}"
     else
@@ -1703,8 +1969,8 @@ verify_installation() {
   fi
 
   # containerd status
-  if pidof systemd &>/dev/null; then
-    if systemctl is-active --quiet containerd 2>/dev/null; then
+  if pidof systemd &> /dev/null; then
+    if systemctl is-active --quiet containerd 2> /dev/null; then
       log_success "containerd service: active"
     else
       log_warn "containerd service: not active"
@@ -1719,6 +1985,64 @@ verify_installation() {
   fi
 
   return $((1 - passed))
+}
+
+# Post-installation health check
+health_check() {
+  log_info "Running post-installation health check..."
+
+  local -i score=0
+  local -ri max_score=5
+
+  # Check Docker CLI responds
+  if docker --version &> /dev/null; then
+    log_debug "Health: Docker CLI responds"
+    ((score++))
+  else
+    log_debug "Health: Docker CLI not responding"
+  fi
+
+  # Check Docker daemon socket exists
+  if [[ -S /var/run/docker.sock ]]; then
+    log_debug "Health: Docker socket exists"
+    ((score++))
+  else
+    log_debug "Health: Docker socket missing"
+  fi
+
+  # Check Docker info works (daemon running)
+  if docker info &> /dev/null; then
+    log_debug "Health: Docker daemon responding"
+    ((score++))
+  else
+    log_debug "Health: Docker daemon not responding"
+  fi
+
+  # Check Can pull an image
+  if docker pull hello-world &> /dev/null; then
+    log_debug "Health: Image pull successful"
+    ((score++))
+  else
+    log_debug "Health: Image pull failed"
+  fi
+
+  # Check Can run a container
+  if docker run --rm hello-world &> /dev/null; then
+    log_debug "Health: Container run successful"
+    ((score++))
+  else
+    log_debug "Health: Container run failed"
+  fi
+
+  log_info "Health check score: ${score}/${max_score}"
+
+  if ((score < 3)); then
+    log_warn "Installation may be incomplete - restart WSL and re-run"
+    return 1
+  fi
+
+  log_success "Health check passed"
+  return 0
 }
 
 #-------------------------------------------------------------------------------
@@ -1738,7 +2062,7 @@ print_summary() {
   log_info "Log file:     ${LOG_FILE}"
   log_info ""
 
-  if ! pidof systemd &>/dev/null; then
+  if ! pidof systemd &> /dev/null; then
     log_warn "ACTION REQUIRED: Restart WSL"
     log_warn "  1. Close all WSL terminals"
     log_warn "  2. PowerShell: wsl --shutdown"
@@ -1754,7 +2078,7 @@ print_summary() {
 # Help
 #-------------------------------------------------------------------------------
 show_help() {
-  cat <<EOF
+  cat << EOF
 ${COLORS[bold]}${SCRIPT_NAME}${COLORS[reset]} v${SCRIPT_VERSION} - Docker Engine installer for WSL2
 
 ${COLORS[bold]}USAGE:${COLORS[reset]}
@@ -1775,6 +2099,7 @@ ${COLORS[bold]}REMOVAL OPTIONS:${COLORS[reset]}
 ${COLORS[bold]}GENERAL OPTIONS:${COLORS[reset]}
     --dry-run          Preview without making changes
     --verbose, -v      Enable verbose output
+    --trace-commands   Enable command-level tracing (DEBUG trap)
     --syslog           Also log to syslog (for enterprise environments)
     --help, -h         Show this help
 
@@ -1823,7 +2148,7 @@ parse_arguments() {
   while (($#)); do
     case "${1}" in
       --user)
-        [[ -n ${2:-} ]] || die "--user requires USERNAME" 1
+        [[ -n ${2:-} ]] || die "--user requires USERNAME" "${EXIT_INVALID_ARGS}"
         validate_username "${2}"
         DOCKER_USER="${2}"
         shift 2
@@ -1845,8 +2170,12 @@ parse_arguments() {
         VERBOSE=true
         shift
         ;;
+      --trace-commands)
+        TRACE_COMMANDS=true
+        shift
+        ;;
       --version)
-        [[ -n ${2:-} ]] || die "--version requires VERSION (e.g., 5:24.0.7-1~ubuntu.22.04~jammy)" 1
+        [[ -n ${2:-} ]] || die "--version requires VERSION (e.g., 5:24.0.7-1~ubuntu.22.04~jammy)" "${EXIT_INVALID_ARGS}"
         DOCKER_VERSION="${2}"
         shift 2
         ;;
@@ -1879,10 +2208,10 @@ parse_arguments() {
         exit 0
         ;;
       -*)
-        die "Unknown option: ${1} (use --help)" 1
+        die "Unknown option: ${1} (use --help)" "${EXIT_INVALID_ARGS}"
         ;;
       *)
-        die "Unexpected argument: ${1} (use --help)" 1
+        die "Unexpected argument: ${1} (use --help)" "${EXIT_INVALID_ARGS}"
         ;;
     esac
   done
@@ -1890,15 +2219,15 @@ parse_arguments() {
   # Validate argument combinations
   if [[ ${REMOVE_MODE} == true ]]; then
     # --remove is mutually exclusive with install-only options
-    [[ -n ${DOCKER_VERSION} ]] && die "--remove and --version are mutually exclusive" 1
-    [[ ${SKIP_IPTABLES} == true ]] && die "--remove and --skip-iptables are mutually exclusive" 1
+    [[ -n ${DOCKER_VERSION} ]] && die "--remove and --version are mutually exclusive" "${EXIT_INVALID_ARGS}"
+    [[ ${SKIP_IPTABLES} == true ]] && die "--remove and --skip-iptables are mutually exclusive" "${EXIT_INVALID_ARGS}"
   fi
 
   # --purge requires --remove
-  [[ ${PURGE_DATA} == true && ${REMOVE_MODE} != true ]] && die "--purge requires --remove" 1
+  [[ ${PURGE_DATA} == true && ${REMOVE_MODE} != true ]] && die "--purge requires --remove" "${EXIT_INVALID_ARGS}"
 
   # --keep-user-group requires --remove
-  [[ ${REMOVE_USER_FROM_GROUP} == false && ${REMOVE_MODE} != true ]] && die "--keep-user-group requires --remove" 1
+  [[ ${REMOVE_USER_FROM_GROUP} == false && ${REMOVE_MODE} != true ]] && die "--keep-user-group requires --remove" "${EXIT_INVALID_ARGS}"
 
   # --force without --remove is a no-op (warn but continue)
   if [[ ${FORCE_REMOVE} == true && ${REMOVE_MODE} != true ]]; then
@@ -1910,9 +2239,8 @@ parse_arguments() {
 # Main
 #-------------------------------------------------------------------------------
 main() {
-  # Initialize logging
   mkdir -p "${LOG_FILE%/*}"
-  : >"${LOG_FILE}"
+  : > "${LOG_FILE}"
   chmod 644 "${LOG_FILE}"
 
   log_info "═══════════════════════════════════════════════════════════════"
@@ -1921,16 +2249,19 @@ main() {
   log_info "═══════════════════════════════════════════════════════════════"
 
   [[ ${DRY_RUN} == true ]] && log_warn "DRY-RUN MODE: No changes will be made"
+  [[ ${TRACE_COMMANDS} == true ]] && log_warn "TRACE MODE: Command tracing enabled"
 
   setup_signal_handlers
+  setup_debug_tracing
 
   # Freeze configuration to prevent modification
-  readonly DOCKER_USER SKIP_IPTABLES DRY_RUN VERBOSE DOCKER_VERSION SYSLOG
+  readonly DOCKER_USER SKIP_IPTABLES DRY_RUN VERBOSE DOCKER_VERSION SYSLOG TRACE_COMMANDS
 
   acquire_lock
 
   # Validation
   check_root
+  validate_required_commands
   check_wsl2
   detect_distribution
   detect_architecture
@@ -1952,6 +2283,13 @@ main() {
   # Verify
   # shellcheck disable=SC2310  # Intentional: allow verification to fail gracefully
   verify_installation || true
+
+  # Run health check if daemon is running
+  if pidof systemd &> /dev/null && docker info &> /dev/null; then
+    # shellcheck disable=SC2310  # Intentional: allow health check to fail gracefully
+    health_check || true
+  fi
+
   print_summary
 
   log_success "Installation completed successfully!"
