@@ -1,6 +1,6 @@
 # DevContainers Setup for Windows 11
 
-![Licence](https://img.shields.io/badge/licence-BSD--3--Clause-blue)
+![Licence](https://img.shields.io/badge/NCSA-yellow?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/platform-Windows%2011-0078D6)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 ![Bash](https://img.shields.io/badge/Bash-5.2%2B-4EAA25)
