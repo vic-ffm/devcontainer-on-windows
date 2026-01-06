@@ -47,16 +47,16 @@ if ((BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 2))); 
 fi
 
 #-------------------------------------------------------------------------------
-# Strict Mode & Safety Settings 
+# Strict Mode & Safety Settings
 #-------------------------------------------------------------------------------
-set -o errexit             
-set -o errtrace          
-set -o nounset           
-set -o pipefail          
-shopt -s extglob         
-shopt -s globskipdots      
-shopt -s inherit_errexit   
-shopt -s assoc_expand_once 
+set -o errexit
+set -o errtrace
+set -o nounset
+set -o pipefail
+shopt -s extglob
+shopt -s globskipdots
+shopt -s inherit_errexit
+shopt -s assoc_expand_once
 
 # Enable debug tracing if TRACE=1
 [[ ${TRACE:-0} == 1 ]] && set -o xtrace
@@ -92,16 +92,16 @@ declare -ra REQUIRED_COMMANDS=(
 )
 
 declare -ra PREREQUISITES=(
-  ca-certificates 
-  curl            
-  wget            
-  git            
-  gnupg          
+  ca-certificates
+  curl
+  wget
+  git
+  gnupg
   openssh-client
-  bash-completion 
-  less        
+  bash-completion
+  less
   nano
-  vim 
+  vim
   unzip
   build-essential
 )
@@ -882,7 +882,7 @@ verify_setup() {
     fi
   fi
 
-  # Check GitHub CLI 
+  # Check GitHub CLI
   if [[ ${SKIP_GITHUB} != true ]]; then
     # shellcheck disable=SC2310  # Intentional: capture result in variable
     if has_command gh; then
@@ -1070,7 +1070,7 @@ main() {
 
   acquire_lock
 
-  # Validation 
+  # Validation
   check_root
   install_prerequisites
   validate_required_commands
@@ -1078,7 +1078,7 @@ main() {
 
   log_info "Target user: ${TARGET_USER}"
 
-  # Setup 
+  # Setup
   create_user "${TARGET_USER}"
   configure_passwordless_sudo "${TARGET_USER}"
   configure_wsl "${TARGET_USER}"

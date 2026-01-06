@@ -56,14 +56,14 @@ fi
 #-------------------------------------------------------------------------------
 # Strict Mode & Safety Settings
 #-------------------------------------------------------------------------------
-set -o errexit            
-set -o errtrace           
-set -o nounset            
-set -o pipefail           
-shopt -s extglob          
-shopt -s globskipdots      
-shopt -s inherit_errexit   
-shopt -s assoc_expand_once 
+set -o errexit
+set -o errtrace
+set -o nounset
+set -o pipefail
+shopt -s extglob
+shopt -s globskipdots
+shopt -s inherit_errexit
+shopt -s assoc_expand_once
 
 # Enable debug tracing if TRACE=1
 [[ ${TRACE:-0} == 1 ]] && set -o xtrace
@@ -395,7 +395,7 @@ verify_gpg_fingerprint() {
   log_success "GPG key fingerprint verified"
 }
 
-# Validate username 
+# Validate username
 validate_username() {
   local -r user="$1"
   if [[ ! ${user} =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
@@ -716,20 +716,20 @@ setup_signal_handlers() {
   trap error_handler ERR
 
   # Graceful termination signals
-  trap 'signal_handler HUP' HUP   
-  trap 'signal_handler INT' INT   
-  trap 'signal_handler QUIT' QUIT 
-  trap 'signal_handler TERM' TERM 
+  trap 'signal_handler HUP' HUP
+  trap 'signal_handler INT' INT
+  trap 'signal_handler QUIT' QUIT
+  trap 'signal_handler TERM' TERM
 
   # Program error signals (fatal - attempt cleanup)
-  trap 'signal_handler ILL' ILL    
-  trap 'signal_handler TRAP' TRAP  
-  trap 'signal_handler ABRT' ABRT  
-  trap 'signal_handler BUS' BUS    
-  trap 'signal_handler FPE' FPE    
-  trap 'signal_handler SEGV' SEGV  
-  trap 'signal_handler SYS' SYS    
-  trap 'signal_handler STKFLT' STKFLT 2>/dev/null || true 
+  trap 'signal_handler ILL' ILL
+  trap 'signal_handler TRAP' TRAP
+  trap 'signal_handler ABRT' ABRT
+  trap 'signal_handler BUS' BUS
+  trap 'signal_handler FPE' FPE
+  trap 'signal_handler SEGV' SEGV
+  trap 'signal_handler SYS' SYS
+  trap 'signal_handler STKFLT' STKFLT 2>/dev/null || true
   # These are not widely available. Attempt to trap but ignore failure
   trap 'signal_handler EMT' EMT 2>/dev/null || true
   trap 'signal_handler IOT' IOT 2>/dev/null || true
@@ -823,7 +823,7 @@ setup_gh_repository() {
   # Create keyring directory if needed
   [[ -d ${keyring_dir} ]] || execute install -m 0755 -d "${keyring_dir}"
 
-  # Check for existing valid setup 
+  # Check for existing valid setup
   if [[ -f ${keyring_file} && -f ${sources_file} ]]; then
     # shellcheck disable=SC2310  # Intentional: check function result in conditional
     if verify_gpg_fingerprint "${keyring_file}" 2>/dev/null; then
@@ -1099,7 +1099,7 @@ check_ssh_key_on_github() {
   local gh_keys
   gh_keys=$(sudo -u "${TARGET_USER}" gh ssh-key list 2>/dev/null) || return 1
 
-  # Extract the key portion 
+  # Extract the key portion
   local key_data
   key_data=$(echo "${pub_key_content}" | awk '{print $2}')
 
@@ -1129,7 +1129,7 @@ upload_ssh_key_to_github() {
   if ! upload_output=$(sudo -u "${TARGET_USER}" gh ssh-key add "${pub_key_file}" \
     --title "${key_title}" \
     --type authentication 2>&1); then
-    # Upload command failed - check if key already exists 
+    # Upload command failed - check if key already exists
     # shellcheck disable=SC2310  # Intentional: check function result in conditional
     if check_ssh_key_on_github "${pub_key_file}"; then
       log_info "SSH key already exists on GitHub"
