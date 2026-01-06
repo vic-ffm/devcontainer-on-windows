@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: NCSA
 #===============================================================================
 # setup-wsl-devcontainers.sh - WSL2 user and system setup for DevContainers
 #
@@ -31,8 +32,7 @@
 # ENVIRONMENT:
 #   TRACE=1            Enable bash debug tracing
 #
-# LICENSE:
-#   BSD 3-Clause "New" or "Revised" License
+# LICENSE:             NCSA
 #===============================================================================
 
 # shellcheck enable=check-set-e-suppressed

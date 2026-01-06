@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: NCSA
 #===============================================================================
 # install-github-cli.sh - GitHub CLI installer with Git/SSH configuration
 #
@@ -38,8 +39,7 @@
 # ENVIRONMENT:
 #   TRACE=1            Enable bash debug tracing
 #
-# LICENSE:
-#   BSD 3-Clause "New" or "Revised" License
+# LICENSE:             NCSA
 #===============================================================================
 
 # shellcheck enable=check-set-e-suppressed

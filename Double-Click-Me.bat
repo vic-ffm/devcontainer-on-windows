@@ -1,11 +1,12 @@
 @echo off
+REM SPDX-License-Identifier: NCSA
 REM ============================================================================
 REM Double-Click-Me.bat
 REM
 REM Double-click this file to set up VS Code DevContainers with WSL2 and Docker.
 REM Automatically requests Administrator privileges
 REM
-REM License: BSD 3-Clause
+REM License: NCSA
 REM ============================================================================
 
 REM Store the script directory (handles paths with spaces)

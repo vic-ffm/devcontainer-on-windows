@@ -263,4 +263,4 @@ For WSL issues, try `wsl --status` and `wsl --update` from PowerShell. If Docker
 
 ## Licence
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+NCSA. See [LICENSE](LICENSE).

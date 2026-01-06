@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: NCSA
 #===============================================================================
 # Setup-DevContainers.ps1 - DevContainers environment setup for Windows 11
 #
@@ -26,8 +27,7 @@
 #   -Force            Overwrite existing configuration
 #   -Help             Show help message
 #
-# LICENSE:
-#   BSD 3-Clause "New" or "Revised" License
+# LICENSE:            NCSA
 #===============================================================================
 
 #Requires -Version 5.1
