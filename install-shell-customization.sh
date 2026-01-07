@@ -48,16 +48,16 @@ if ((BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 2))); 
 fi
 
 #-------------------------------------------------------------------------------
-# Strict Mode & Safety Settings 
+# Strict Mode & Safety Settings
 #-------------------------------------------------------------------------------
-set -o errexit           
-set -o errtrace          
-set -o nounset           
-set -o pipefail          
-shopt -s extglob         
-shopt -s globskipdots      
-shopt -s inherit_errexit   
-shopt -s assoc_expand_once 
+set -o errexit
+set -o errtrace
+set -o nounset
+set -o pipefail
+shopt -s extglob
+shopt -s globskipdots
+shopt -s inherit_errexit
+shopt -s assoc_expand_once
 
 # Enable debug tracing if TRACE=1
 [[ ${TRACE:-0} == 1 ]] && set -o xtrace

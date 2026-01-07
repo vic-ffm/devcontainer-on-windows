@@ -831,21 +831,38 @@ configure_vscode_integration() {
     fi
   fi
 
-  if [[ -n "${vscode_win_path}" ]]; then
-    # Add VS Code to PATH in .bashrc
-    local -r marker="# VS Code WSL Integration"
-    if ! grep -q "${marker}" "${bashrc}" 2>/dev/null; then
-      log_info "Adding VS Code to PATH..."
-      cat >>"${bashrc}" <<EOF
+  # Add Windows paths to both .bashrc and .zshrc for WSL interop
+  # This is needed because appendWindowsPath=false keeps Linux PATH clean
+  local -r marker="# Windows Integration (VS Code + System32)"
+  local -r zshrc="${user_home}/.zshrc"
+  local -r win_sys32="/mnt/c/Windows/System32"
+  local paths_to_add=""
+
+  # Build the paths string (VS Code if found, Windows System32 for explorer.exe etc.)
+  [[ -n "${vscode_win_path}" ]] && paths_to_add="${vscode_win_path}"
+  [[ -d "${win_sys32}" ]] && paths_to_add="${paths_to_add:+${paths_to_add}:}${win_sys32}"
+
+  if [[ -n "${paths_to_add}" ]]; then
+    for shell_rc in "${bashrc}" "${zshrc}"; do
+      if [[ -f "${shell_rc}" ]]; then
+        if ! grep -q "${marker}" "${shell_rc}" 2>/dev/null; then
+          log_info "Adding Windows paths to $(basename "${shell_rc}")..."
+          cat >>"${shell_rc}" <<EOF
 
 ${marker}
-export PATH="\$PATH:${vscode_win_path}"
+export PATH="\$PATH:${paths_to_add}"
 EOF
-      log_success "Added VS Code to PATH"
-    else
-      log_info "VS Code PATH already configured"
-    fi
+        else
+          log_debug "Windows paths already configured in $(basename "${shell_rc}")"
+        fi
+      fi
+    done
+    log_success "Windows integration paths configured"
   else
+    log_warn "No Windows paths to add"
+  fi
+
+  if [[ -z "${vscode_win_path}" ]]; then
     log_warn "VS Code installation not found on Windows"
     log_warn "Install VS Code on Windows, then 'code .' will work from WSL"
   fi
