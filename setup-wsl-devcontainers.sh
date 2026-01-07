@@ -27,6 +27,7 @@
 #   --verbose, -v      Enable verbose output
 #   --skip-docker      Skip Docker installation
 #   --skip-github      Skip GitHub CLI installation and authentication
+#   --skip-shell       Skip shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)
 #   --help, -h         Show this help message
 #
 # ENVIRONMENT:
@@ -83,6 +84,7 @@ declare -ri EXIT_DOCKER_FAILED=6
 declare -ri EXIT_GITHUB_FAILED=7
 # shellcheck disable=SC2034  # EXIT_USER_CANCELLED defined for completeness
 declare -ri EXIT_USER_CANCELLED=8
+declare -ri EXIT_SHELL_FAILED=9
 
 # Required commands
 declare -ra REQUIRED_COMMANDS=(
@@ -114,6 +116,7 @@ declare DRY_RUN=false
 declare VERBOSE=false
 declare SKIP_DOCKER=false
 declare SKIP_GITHUB=false
+declare SKIP_SHELL=false
 
 # Cleanup state tracking
 declare -i CLEANUP_IN_PROGRESS=0
@@ -508,7 +511,7 @@ install_prerequisites() {
 create_user() {
   local -r username="$1"
 
-  log_step "1/8" "Creating user '${username}'"
+  log_step "1/9" "Creating user '${username}'"
 
   # Check if user already exists
   if id "${username}" &>/dev/null; then
@@ -539,7 +542,7 @@ create_user() {
 configure_passwordless_sudo() {
   local -r username="$1"
 
-  log_step "2/8" "Configuring passwordless sudo"
+  log_step "2/9" "Configuring passwordless sudo"
 
   local -r sudoers_file="/etc/sudoers.d/${username}"
   local -r sudoers_content="${username} ALL=(ALL) NOPASSWD:ALL"
@@ -572,7 +575,7 @@ configure_passwordless_sudo() {
 configure_wsl() {
   local -r username="$1"
 
-  log_step "3/8" "Configuring WSL environment"
+  log_step "3/9" "Configuring WSL environment"
 
   local -r wsl_conf="/etc/wsl.conf"
 
@@ -618,7 +621,7 @@ configure_git() {
   local -r username="$1"
   local -r user_home="/home/${username}"
 
-  log_step "4/8" "Configuring Git"
+  log_step "4/9" "Configuring Git"
 
   if [[ ${DRY_RUN} == true ]]; then
     log_info "[DRY-RUN] Would configure Git for ${username}"
@@ -654,7 +657,7 @@ configure_git() {
 install_docker() {
   local -r username="$1"
 
-  log_step "5/8" "Installing Docker"
+  log_step "5/9" "Installing Docker"
 
   if [[ ${SKIP_DOCKER} == true ]]; then
     log_info "Skipping Docker installation (--skip-docker)"
@@ -698,7 +701,7 @@ install_docker() {
 install_github_cli() {
   local -r username="$1"
 
-  log_step "6/8" "Installing GitHub CLI and configuring authentication"
+  log_step "6/9" "Installing GitHub CLI and configuring authentication"
 
   if [[ ${SKIP_GITHUB} == true ]]; then
     log_info "Skipping GitHub CLI installation (--skip-github)"
@@ -741,12 +744,58 @@ install_github_cli() {
   log_success "GitHub CLI installed and configured"
 }
 
+install_shell_customization() {
+  local -r username="$1"
+
+  log_step "7/9" "Installing shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)"
+
+  if [[ ${SKIP_SHELL} == true ]]; then
+    log_info "Skipping shell customization (--skip-shell)"
+    return 0
+  fi
+
+  # Check for local installer
+  # shellcheck disable=SC2312  # Intentional: failure here will cause file checks to fail gracefully
+  local -r script_dir="$(dirname "$(readlink -f "$0")")"
+  local installer=""
+
+  if [[ -f "${script_dir}/install-shell-customization.sh" ]]; then
+    installer="${script_dir}/install-shell-customization.sh"
+    log_debug "Using bundled shell customization installer: ${installer}"
+  elif [[ -f "/tmp/install-shell-customization.sh" ]]; then
+    installer="/tmp/install-shell-customization.sh"
+    log_debug "Using /tmp shell customization installer"
+  else
+    log_warn "install-shell-customization.sh not found - skipping shell customization"
+    log_warn "To install shell customization later, run: sudo ./install-shell-customization.sh --user ${username}"
+    return 0
+  fi
+
+  if [[ ${DRY_RUN} == true ]]; then
+    log_info "[DRY-RUN] Would execute: ${installer} --user ${username}"
+    return 0
+  fi
+
+  # Execute shell customization installer
+  local -a shell_args=(--user "${username}")
+  [[ ${VERBOSE} == true ]] && shell_args+=(--verbose)
+
+  bash "${installer}" "${shell_args[@]}"
+  local -ri rc=$?
+
+  if ((rc != 0)); then
+    die "Shell customization installation failed (exit code: ${rc})" "${EXIT_SHELL_FAILED}"
+  fi
+
+  log_success "Shell customization installed successfully"
+}
+
 configure_vscode_integration() {
   local -r username="$1"
   local -r user_home="/home/${username}"
   local -r bashrc="${user_home}/.bashrc"
 
-  log_step "7/8" "Configuring VS Code integration"
+  log_step "8/9" "Configuring VS Code integration"
 
   if [[ ${DRY_RUN} == true ]]; then
     log_info "[DRY-RUN] Would configure VS Code integration"
@@ -812,7 +861,7 @@ EOF
 verify_setup() {
   local -r username="$1"
 
-  log_step "8/8" "Verifying setup"
+  log_step "9/9" "Verifying setup"
 
   if [[ ${DRY_RUN} == true ]]; then
     log_info "[DRY-RUN] Verification skipped"
@@ -906,6 +955,42 @@ verify_setup() {
     fi
   fi
 
+  # Check shell customization
+  if [[ ${SKIP_SHELL} != true ]]; then
+    # shellcheck disable=SC2310  # Intentional: capture result in variable
+    if has_command zsh; then
+      log_success "Zsh installed"
+    else
+      log_warn "Zsh not installed"
+    fi
+
+    if [[ -d "/home/${username}/.oh-my-zsh" ]]; then
+      log_success "Oh-My-Zsh installed"
+    else
+      log_warn "Oh-My-Zsh not installed"
+    fi
+
+    if [[ -d "/home/${username}/.oh-my-zsh/custom/themes/powerlevel10k" ]]; then
+      log_success "Powerlevel10k installed"
+    else
+      log_warn "Powerlevel10k not installed"
+    fi
+
+    if [[ -f "/home/${username}/.local/bin/mise" ]]; then
+      log_success "mise installed"
+    else
+      log_warn "mise not installed"
+    fi
+
+    local current_shell
+    current_shell=$(getent passwd "${username}" | cut -d: -f7)
+    if [[ ${current_shell} == *zsh ]]; then
+      log_success "Default shell: ${current_shell}"
+    else
+      log_warn "Default shell is not Zsh: ${current_shell}"
+    fi
+  fi
+
   return $((issues > 0 ? 1 : 0))
 }
 
@@ -924,6 +1009,7 @@ print_summary() {
   log_info "Home directory:    /home/${TARGET_USER}"
   log_info "Projects folder:   /home/${TARGET_USER}/projects"
   log_info "Passwordless sudo: Enabled"
+  [[ ${SKIP_SHELL} != true ]] && log_info "Default shell:     Zsh (with Oh-My-Zsh + Powerlevel10k)"
   log_info "Log file:          ${LOG_FILE}"
   log_info ""
 
@@ -934,6 +1020,7 @@ print_summary() {
   log_warn "  4. Test GitHub: gh auth status"
   log_warn "  5. Test SSH: ssh -T git@github.com"
   log_warn "  6. Clone projects to ~/projects (NOT /mnt/c)"
+  [[ ${SKIP_SHELL} != true ]] && log_warn "  7. Install dev tools via mise: mise use -g python@latest"
   log_info ""
 
   log_info "Best practice: Store code in Linux filesystem for performance"
@@ -959,6 +1046,7 @@ ${COLORS[bold]}OPTIONS:${COLORS[reset]}
     --verbose, -v      Enable verbose output
     --skip-docker      Skip Docker installation
     --skip-github      Skip GitHub CLI installation and authentication
+    --skip-shell       Skip shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)
     --help, -h         Show this help message
 
 ${COLORS[bold]}WHAT THIS SCRIPT DOES:${COLORS[reset]}
@@ -968,6 +1056,7 @@ ${COLORS[bold]}WHAT THIS SCRIPT DOES:${COLORS[reset]}
     4. Creates ~/projects directory for code
     5. Installs Docker via install-docker.sh
     6. Installs GitHub CLI and configures Git authentication
+    7. Installs shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)
 
 ${COLORS[bold]}EXAMPLES:${COLORS[reset]}
     # Standard setup
@@ -1028,6 +1117,10 @@ parse_arguments() {
         SKIP_GITHUB=true
         shift
         ;;
+      --skip-shell)
+        SKIP_SHELL=true
+        shift
+        ;;
       --help | -h)
         show_help
         exit 0
@@ -1066,7 +1159,7 @@ main() {
   setup_signal_handlers
 
   # Freeze configuration
-  readonly TARGET_USER DRY_RUN VERBOSE SKIP_DOCKER SKIP_GITHUB
+  readonly TARGET_USER DRY_RUN VERBOSE SKIP_DOCKER SKIP_GITHUB SKIP_SHELL
 
   acquire_lock
 
@@ -1085,6 +1178,7 @@ main() {
   configure_git "${TARGET_USER}"
   install_docker "${TARGET_USER}"
   install_github_cli "${TARGET_USER}"
+  install_shell_customization "${TARGET_USER}"
   configure_vscode_integration "${TARGET_USER}"
 
   # Verify

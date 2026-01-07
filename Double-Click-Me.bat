@@ -96,6 +96,8 @@ if "%FILES_OK%"=="0" (
     echo.
     echo Optional files:
     echo   - install-github-cli.sh   [GitHub CLI setup]
+    echo   - install-shell-customization.sh   [Zsh/Oh-My-Zsh/mise setup]
+    echo   - p10k.zsh   [Powerlevel10k theme config]
     echo.
     goto :error_exit
 )
@@ -108,6 +110,19 @@ if not exist "%SCRIPT_DIR%install-github-cli.sh" (
     echo [WARN] Optional: install-github-cli.sh not found
     echo        GitHub CLI setup will be skipped
     echo.
+)
+
+REM Check for optional shell customization files
+if not exist "%SCRIPT_DIR%install-shell-customization.sh" (
+    echo [WARN] Optional: install-shell-customization.sh not found
+    echo        Shell customization ^(Zsh/Oh-My-Zsh/mise^) will be skipped
+    echo.
+) else (
+    if not exist "%SCRIPT_DIR%p10k.zsh" (
+        echo [WARN] Optional: p10k.zsh not found
+        echo        Default Powerlevel10k config will be generated
+        echo.
+    )
 )
 
 echo Starting setup...

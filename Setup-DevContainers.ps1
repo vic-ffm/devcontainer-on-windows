@@ -784,6 +784,8 @@ function Initialize-WslDistro {
     $setupScript = Join-Path $scriptDir "setup-wsl-devcontainers.sh"
     $dockerScript = Join-Path $scriptDir "install-docker.sh"
     $githubScript = Join-Path $scriptDir "install-github-cli.sh"
+    $shellScript = Join-Path $scriptDir "install-shell-customization.sh"
+    $p10kConfig = Join-Path $scriptDir "p10k.zsh"
 
     if (-not (Test-Path $setupScript)) {
         Exit-WithError "setup-wsl-devcontainers.sh not found at: $setupScript" $script:EXIT_GENERAL_ERROR
@@ -796,6 +798,16 @@ function Initialize-WslDistro {
     $hasGithubScript = Test-Path $githubScript
     if (-not $hasGithubScript) {
         Write-LogWarn "install-github-cli.sh not found - GitHub CLI setup will be skipped"
+    }
+
+    $hasShellScript = Test-Path $shellScript
+    if (-not $hasShellScript) {
+        Write-LogWarn "install-shell-customization.sh not found - Shell customization will be skipped"
+    }
+
+    $hasP10kConfig = Test-Path $p10kConfig
+    if ($hasShellScript -and -not $hasP10kConfig) {
+        Write-LogWarn "p10k.zsh not found - Default Powerlevel10k config will be generated"
     }
 
     if ($DryRun) {
@@ -851,10 +863,26 @@ function Initialize-WslDistro {
                 $githubBytes = [System.IO.File]::ReadAllBytes($githubScript)
             }
 
+            $shellBytes = $null
+            if ($hasShellScript) {
+                $shellBytes = [System.IO.File]::ReadAllBytes($shellScript)
+            }
+
+            $p10kBytes = $null
+            if ($hasP10kConfig) {
+                $p10kBytes = [System.IO.File]::ReadAllBytes($p10kConfig)
+            }
+
             Write-LogDebug "Setup script: $($setupBytes.Length) bytes"
             Write-LogDebug "Docker script: $($dockerBytes.Length) bytes"
             if ($githubBytes) {
                 Write-LogDebug "GitHub CLI script: $($githubBytes.Length) bytes"
+            }
+            if ($shellBytes) {
+                Write-LogDebug "Shell customization script: $($shellBytes.Length) bytes"
+            }
+            if ($p10kBytes) {
+                Write-LogDebug "P10k config: $($p10kBytes.Length) bytes"
             }
 
             # Write files to temp directory
@@ -867,6 +895,18 @@ function Initialize-WslDistro {
             if ($githubBytes) {
                 $tempGithubPath = Join-Path $tempDir "install-github-cli.sh"
                 [System.IO.File]::WriteAllBytes($tempGithubPath, $githubBytes)
+            }
+
+            $tempShellPath = $null
+            if ($shellBytes) {
+                $tempShellPath = Join-Path $tempDir "install-shell-customization.sh"
+                [System.IO.File]::WriteAllBytes($tempShellPath, $shellBytes)
+            }
+
+            $tempP10kPath = $null
+            if ($p10kBytes) {
+                $tempP10kPath = Join-Path $tempDir "p10k.zsh"
+                [System.IO.File]::WriteAllBytes($tempP10kPath, $p10kBytes)
             }
 
             # Convert Windows path to WSL path 
@@ -892,6 +932,20 @@ function Initialize-WslDistro {
                 }
             }
 
+            if ($tempShellPath) {
+                wsl -d $WslDistroName -u root -- sh -c "cat '$wslTempDir/install-shell-customization.sh' | tr -d '\r' > /tmp/install-shell-customization.sh"
+                if ($LASTEXITCODE -ne 0) {
+                    Write-LogWarn "Failed to copy install-shell-customization.sh to WSL"
+                }
+            }
+
+            if ($tempP10kPath) {
+                wsl -d $WslDistroName -u root -- sh -c "cat '$wslTempDir/p10k.zsh' | tr -d '\r' > /tmp/p10k.zsh"
+                if ($LASTEXITCODE -ne 0) {
+                    Write-LogWarn "Failed to copy p10k.zsh to WSL"
+                }
+            }
+
             # Verify files exist
             $verifyResult = wsl -d $WslDistroName -u root -- ls -la /tmp/*.sh 2>&1
             $verifyStr = ($verifyResult | Out-String) -replace '\x00', '' -replace '\r', ''
@@ -914,6 +968,9 @@ function Initialize-WslDistro {
             $chmodScripts = @("/tmp/setup-wsl-devcontainers.sh", "/tmp/install-docker.sh")
             if ($tempGithubPath) {
                 $chmodScripts += "/tmp/install-github-cli.sh"
+            }
+            if ($tempShellPath) {
+                $chmodScripts += "/tmp/install-shell-customization.sh"
             }
 
             foreach ($scriptPath in $chmodScripts) {
