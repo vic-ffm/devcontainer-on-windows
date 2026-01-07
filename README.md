@@ -263,4 +263,6 @@ For WSL issues, try `wsl --status` and `wsl --update` from PowerShell. If Docker
 
 ## Licence
 
-NCSA. See [LICENSE](LICENSE).
+Copyright (c) State Government of Victoria 2026. All rights reserved.
+Licensed under the University of Illinois/NCSA Open Source Licence (UIUC). See [LICENSE](LICENSE).
+p10k.zsh has been copied from [powerlevel10k](https://github.com/romkatv/powerlevel10k/blob/master/config/p10k-rainbow.zsh) and is licensed under the MIT Licence. 
