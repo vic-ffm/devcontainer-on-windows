@@ -91,14 +91,12 @@ $script:SUPPORTED_DISTROS = @{
         WslName       = 'Debian'
         DisplayName   = 'Debian 13 Trixie'
         IsDefault     = $true
-        Kernel        = 'Linux 6.12 LTS'
         SupportUntil  = '2030-06-30'
     }
     'Ubuntu' = @{
         WslName       = 'Ubuntu-24.04'
         DisplayName   = 'Ubuntu 24.04 LTS'
         IsDefault     = $false
-        Kernel        = 'Linux 6.8'
         SupportUntil  = '2029-04'
     }
 }
@@ -631,7 +629,6 @@ function Install-WslDistro {
 
     Write-LogInfo "Installing $displayName..."
     Write-LogInfo "  WSL Name: $wslName"
-    Write-LogInfo "  Kernel: $($distroInfo.Kernel)"
     Write-LogInfo "  Support until: $($distroInfo.SupportUntil)"
 
     if ($DryRun) {
@@ -1234,8 +1231,8 @@ OPTIONS:
     -Help              Show this help message
 
 SUPPORTED DISTRIBUTIONS:
-    Debian    Debian 13 Trixie (default) - Linux 6.12 LTS, support until 2030
-    Ubuntu    Ubuntu 24.04 LTS - Linux 6.8, support until 2029
+    Debian    Debian 13 Trixie (default) - support until 2030
+    Ubuntu    Ubuntu 24.04 LTS - support until 2029
 
 EXAMPLES:
     # Standard setup with Debian (default)
