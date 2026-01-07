@@ -24,6 +24,7 @@
 #   -DryRun           Show what would be done without making changes
 #   -NonInteractive   Skip all prompts, use defaults
 #   -SkipApps         Skip Windows Terminal/VS Code installation
+#   -SkipFonts        Skip MesloLGS NF font installation
 #   -Force            Overwrite existing configuration
 #   -Help             Show help message
 #
@@ -49,6 +50,9 @@ param(
 
     [Parameter(HelpMessage = "Skip Windows Terminal/VS Code installation")]
     [switch]$SkipApps,
+
+    [Parameter(HelpMessage = "Skip MesloLGS NF font installation")]
+    [switch]$SkipFonts,
 
     [Parameter(HelpMessage = "Overwrite existing configuration")]
     [switch]$Force,
@@ -106,6 +110,15 @@ $script:VSCODE_EXTENSIONS = @(
     'ms-vscode-remote.remote-containers'
     'ms-vscode-remote.remote-wsl'
 )
+
+# MesloLGS NF font files (bundled with repo for Powerlevel10k)
+$script:MESLO_FONT_FILES = @(
+    'MesloLGS NF Regular.ttf'
+    'MesloLGS NF Bold.ttf'
+    'MesloLGS NF Italic.ttf'
+    'MesloLGS NF Bold Italic.ttf'
+)
+$script:MESLO_FONT_NAME = "MesloLGS NF"
 
 #-------------------------------------------------------------------------------
 # Logging Functions
@@ -529,7 +542,7 @@ function Test-WSL2Enabled {
 }
 
 function Enable-WSL2Features {
-    Write-LogStep "1/6" "Enabling WSL2 features"
+    Write-LogStep "1/7" "Enabling WSL2 features"
 
     $status = Test-WSL2Enabled
     $needsReboot = $false
@@ -578,7 +591,7 @@ function Enable-WSL2Features {
 }
 
 function Get-ExistingDistros {
-    Write-LogStep "2/6" "Checking existing WSL distributions"
+    Write-LogStep "2/7" "Checking existing WSL distributions"
 
     try {
         # WSL outputs UTF-16LE which PowerShell may not handle well
@@ -760,7 +773,7 @@ function Initialize-WslDistro {
         [string]$WslDistroName
     )
 
-    Write-LogStep "3/6" "Configuring Linux environment"
+    Write-LogStep "3/7" "Configuring Linux environment"
 
     # Derive Unix username from Windows username
     $winUser = $env:USERNAME
@@ -1040,7 +1053,7 @@ function Test-WingetAvailable {
 }
 
 function Install-WindowsTerminal {
-    Write-LogStep "4/6" "Checking Windows Terminal"
+    Write-LogStep "4/7" "Checking Windows Terminal"
 
     try {
         $terminal = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
@@ -1085,8 +1098,206 @@ function Install-WindowsTerminal {
     }
 }
 
+function Install-MesloLGSNFFont {
+    Write-LogStep "5/7" "Installing MesloLGS NF Font"
+
+    # Get script directory where font files are bundled
+    # $PSScriptRoot is the recommended method for PowerShell 3.0+
+    # It correctly returns the script's directory even when called from within a function
+    # (unlike $MyInvocation.MyCommand.Path which would return the function's info)
+    if (-not $PSScriptRoot) {
+        Write-LogWarn "Could not determine script directory (running interactively?)"
+        Write-LogWarn "Font installation skipped - run script from file to install fonts"
+        return
+    }
+    $scriptDir = $PSScriptRoot
+
+    # Check if any font files exist
+    $fontsFound = @()
+    foreach ($fontFile in $script:MESLO_FONT_FILES) {
+        $fontPath = Join-Path $scriptDir $fontFile
+        if (Test-Path $fontPath) {
+            $fontsFound += $fontPath
+        }
+        else {
+            Write-LogDebug "Font file not found: $fontPath"
+        }
+    }
+
+    if ($fontsFound.Count -eq 0) {
+        Write-LogWarn "No MesloLGS NF font files found in script directory"
+        Write-LogWarn "Expected location: $scriptDir"
+        return
+    }
+
+    if ($DryRun) {
+        Write-LogInfo "[DRY-RUN] Would install $($fontsFound.Count) MesloLGS NF font(s)"
+        Write-LogInfo "[DRY-RUN] Would configure Windows Terminal and VS Code to use MesloLGS NF"
+        return
+    }
+
+    Write-LogInfo "Installing $($fontsFound.Count) font file(s)..."
+
+    try {
+        # Use Shell.Application COM object - modern method since Windows 10 1809
+        # 0x14 = Fonts folder CLSID, automatically handles per-user installation and registry
+        $fontsFolder = (New-Object -ComObject Shell.Application).Namespace(0x14)
+
+        foreach ($fontPath in $fontsFound) {
+            $fontName = Split-Path -Leaf $fontPath
+            Write-LogDebug "Installing font: $fontName"
+            # 0x10 = suppress "replace?" dialog if font already exists
+            $fontsFolder.CopyHere($fontPath, 0x10)
+        }
+
+        Write-LogSuccess "MesloLGS NF fonts installed ($($fontsFound.Count) files)"
+        Write-LogInfo "Note: You may need to restart applications for fonts to appear"
+    }
+    catch {
+        Write-LogWarn "Font installation failed: $_"
+        Write-LogWarn "You can manually install fonts by double-clicking the .ttf files"
+    }
+
+    # Configure terminals to use the font
+    Set-WindowsTerminalFont
+    Set-VSCodeTerminalFont
+}
+
+function Set-WindowsTerminalFont {
+    Write-LogInfo "Configuring Windows Terminal font..."
+
+    # Windows Terminal has multiple possible locations depending on installation method
+    $wtPossiblePaths = @(
+        # Store version (stable) - installed by winget
+        (Join-Path $env:LOCALAPPDATA "Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json")
+        # Store version (preview)
+        (Join-Path $env:LOCALAPPDATA "Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json")
+        # Unpackaged (Scoop, Chocolatey, etc.)
+        (Join-Path $env:LOCALAPPDATA "Microsoft\Windows Terminal\settings.json")
+    )
+
+    $wtSettingsPath = $wtPossiblePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    if (-not $wtSettingsPath) {
+        Write-LogWarn "Windows Terminal settings not found"
+        Write-LogWarn "Open Windows Terminal once, then re-run with -Force to configure font"
+        return
+    }
+
+    if ($DryRun) {
+        Write-LogInfo "[DRY-RUN] Would update Windows Terminal font to $($script:MESLO_FONT_NAME)"
+        return
+    }
+
+    try {
+        # Backup existing settings
+        $backupPath = "$wtSettingsPath.backup"
+        Copy-Item $wtSettingsPath $backupPath -Force
+        Write-LogDebug "Backed up Windows Terminal settings to $backupPath"
+
+        # Read and parse settings
+        $settingsContent = Get-Content $wtSettingsPath -Raw -Encoding UTF8
+        $settings = $settingsContent | ConvertFrom-Json
+
+        # Ensure profiles.defaults exists
+        if (-not $settings.profiles) {
+            $settings | Add-Member -NotePropertyName profiles -NotePropertyValue ([PSCustomObject]@{}) -Force
+        }
+        if (-not $settings.profiles.defaults) {
+            $settings.profiles | Add-Member -NotePropertyName defaults -NotePropertyValue ([PSCustomObject]@{}) -Force
+        }
+
+        # Set font configuration (v1.10+ style with font object)
+        $fontConfig = [PSCustomObject]@{
+            face = $script:MESLO_FONT_NAME
+        }
+
+        if ($settings.profiles.defaults.font) {
+            $settings.profiles.defaults.font | Add-Member -NotePropertyName face -NotePropertyValue $script:MESLO_FONT_NAME -Force
+        }
+        else {
+            $settings.profiles.defaults | Add-Member -NotePropertyName font -NotePropertyValue $fontConfig -Force
+        }
+
+        # Write back with proper formatting
+        $settingsJson = $settings | ConvertTo-Json -Depth 100
+        Set-Content -Path $wtSettingsPath -Value $settingsJson -Encoding UTF8
+
+        Write-LogSuccess "Windows Terminal configured to use $($script:MESLO_FONT_NAME)"
+    }
+    catch {
+        Write-LogWarn "Failed to configure Windows Terminal font: $_"
+        # Restore backup if it exists
+        if (Test-Path $backupPath) {
+            Copy-Item $backupPath $wtSettingsPath -Force
+            Write-LogDebug "Restored Windows Terminal settings from backup"
+        }
+    }
+}
+
+function Set-VSCodeTerminalFont {
+    Write-LogInfo "Configuring VS Code terminal font..."
+
+    # VS Code user settings location
+    $vscodeSettingsDir = Join-Path $env:APPDATA "Code\User"
+    $vscodeSettingsPath = Join-Path $vscodeSettingsDir "settings.json"
+
+    if ($DryRun) {
+        Write-LogInfo "[DRY-RUN] Would update VS Code terminal font to $($script:MESLO_FONT_NAME)"
+        return
+    }
+
+    try {
+        # Create directory if needed
+        if (-not (Test-Path $vscodeSettingsDir)) {
+            New-Item -ItemType Directory -Path $vscodeSettingsDir -Force | Out-Null
+        }
+
+        # Read existing settings or create empty object
+        $settings = @{}
+        if (Test-Path $vscodeSettingsPath) {
+            # Backup existing settings
+            $backupPath = "$vscodeSettingsPath.backup"
+            Copy-Item $vscodeSettingsPath $backupPath -Force
+            Write-LogDebug "Backed up VS Code settings to $backupPath"
+
+            $settingsContent = Get-Content $vscodeSettingsPath -Raw -Encoding UTF8
+            if ($settingsContent -and $settingsContent.Trim()) {
+                # Handle JSON with comments (VS Code allows them) - strip them out
+                $cleanContent = $settingsContent -replace '//[^\r\n]*', '' -replace '/\*[\s\S]*?\*/', ''
+                # Remove trailing commas before } or ]
+                $cleanContent = $cleanContent -replace ',(\s*[}\]])', '$1'
+
+                try {
+                    $parsed = $cleanContent | ConvertFrom-Json
+                    # Convert PSCustomObject to hashtable
+                    $parsed.PSObject.Properties | ForEach-Object {
+                        $settings[$_.Name] = $_.Value
+                    }
+                }
+                catch {
+                    Write-LogDebug "Could not parse existing VS Code settings, creating new"
+                    $settings = @{}
+                }
+            }
+        }
+
+        # Set terminal font family
+        $settings['terminal.integrated.fontFamily'] = $script:MESLO_FONT_NAME
+
+        # Write back with proper formatting
+        $settingsJson = $settings | ConvertTo-Json -Depth 100
+        Set-Content -Path $vscodeSettingsPath -Value $settingsJson -Encoding UTF8
+
+        Write-LogSuccess "VS Code terminal configured to use $($script:MESLO_FONT_NAME)"
+    }
+    catch {
+        Write-LogWarn "Failed to configure VS Code font: $_"
+    }
+}
+
 function Install-VSCode {
-    Write-LogStep "5/6" "Checking VS Code"
+    Write-LogStep "6/7" "Checking VS Code"
 
     # Check common installation paths
     $vscodePaths = @(
@@ -1147,7 +1358,7 @@ function Install-VSCode {
 }
 
 function Install-VSCodeExtensions {
-    Write-LogStep "6/6" "Installing VS Code extensions"
+    Write-LogStep "7/7" "Installing VS Code extensions"
 
     # Refresh PATH to ensure code is available
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
@@ -1226,6 +1437,7 @@ OPTIONS:
     -DryRun            Preview without making changes
     -NonInteractive    Skip all prompts, use defaults
     -SkipApps          Skip Windows Terminal/VS Code installation
+    -SkipFonts         Skip MesloLGS NF font installation
     -Force             Overwrite existing configuration
     -Verbose           Enable verbose output
     -Help              Show this help message
@@ -1258,7 +1470,8 @@ WHAT THIS SCRIPT DOES:
     5. Installs Docker Engine (native, not Docker Desktop)
     6. Installs GitHub CLI and configures Git authentication (SSH keys)
     7. Installs Windows Terminal (via winget)
-    8. Installs VS Code with DevContainers extensions
+    8. Installs MesloLGS NF font for Powerlevel10k theme
+    9. Installs VS Code with DevContainers extensions
 
 REQUIREMENTS:
     - Windows 11 22H2+ (or Windows 10 2004+)
@@ -1415,6 +1628,15 @@ function Main {
     # Windows applications
     if (-not $SkipApps) {
         Install-WindowsTerminal
+
+        # Install MesloLGS NF font for Powerlevel10k
+        if (-not $SkipFonts) {
+            Install-MesloLGSNFFont
+        }
+        else {
+            Write-LogInfo "Skipping font installation (-SkipFonts)"
+        }
+
         $null = Install-VSCode
         Install-VSCodeExtensions
     }
