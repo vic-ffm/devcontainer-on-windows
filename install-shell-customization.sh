@@ -21,7 +21,7 @@
 #
 # REMOVAL OPTIONS:
 #   --remove           Remove shell customization (Antidote, configs)
-#   --purge            Also remove mise, thefuck, and their data
+#   --purge            Also remove mise and its data
 #   --force, -f        Skip confirmation prompts
 #
 # GENERAL OPTIONS:
@@ -730,7 +730,7 @@ check_network() {
 # Installation Functions
 #-------------------------------------------------------------------------------
 install_zsh() {
-  log_step "1/6" "Installing Zsh"
+  log_step "1/5" "Installing Zsh"
 
   # Check if already installed
   # shellcheck disable=SC2310  # Intentional: idempotency check in conditional
@@ -757,7 +757,7 @@ install_zsh() {
 }
 
 install_fzf() {
-  log_step "2/6" "Installing fzf"
+  log_step "2/5" "Installing fzf"
 
   # Check if already installed
   # shellcheck disable=SC2310  # Intentional: idempotency check in conditional
@@ -784,7 +784,7 @@ install_fzf() {
 }
 
 install_antidote() {
-  log_step "3/6" "Installing Antidote plugin manager"
+  log_step "3/5" "Installing Antidote plugin manager"
 
   if [[ -d ${ANTIDOTE_DIR} ]]; then
     log_success "Antidote already installed at ${ANTIDOTE_DIR}"
@@ -806,7 +806,7 @@ install_antidote() {
 }
 
 install_mise() {
-  log_step "4/6" "Installing mise (version manager)"
+  log_step "4/5" "Installing mise (version manager)"
 
   # Check if already installed
   if [[ -f ${MISE_BIN} ]]; then
@@ -858,37 +858,8 @@ install_mise() {
   log_info "Note: mise does NOT install any default tools - projects define tools via mise.toml"
 }
 
-install_thefuck() {
-  log_step "5/6" "Installing thefuck (command correction)"
-
-  # shellcheck disable=SC2310  # Intentional: idempotency check in conditional
-  if has_command thefuck; then
-    log_success "thefuck already installed"
-    return 0
-  fi
-
-  if [[ ${DRY_RUN} == true ]]; then
-    log_info "[DRY-RUN] Would install thefuck via pip"
-    return 0
-  fi
-
-  execute apt_install python3-dev python3-pip python3-setuptools
-
-  log_info "Installing thefuck via pip..."
-  sudo -u "${TARGET_USER}" pip3 install thefuck --user --break-system-packages 2>/dev/null \
-    || sudo -u "${TARGET_USER}" pip3 install thefuck --user
-
-  local thefuck_bin="${USER_HOME}/.local/bin/thefuck"
-  if [[ -f ${thefuck_bin} ]]; then
-    log_success "thefuck installed"
-  else
-    log_warn "thefuck installation may have failed"
-    log_warn "Users can install later: pip3 install thefuck --user"
-  fi
-}
-
 configure_shell() {
-  log_step "6/6" "Configuring shell environment"
+  log_step "5/5" "Configuring shell environment"
 
   local -r zshenv_file="${USER_HOME}/.zshenv"
   # shellcheck disable=SC2312  # Intentional: file check below handles failure gracefully
@@ -1008,10 +979,6 @@ if [[ -f "$HOME/.local/bin/mise" ]]; then
   eval "$($HOME/.local/bin/mise activate zsh)"
 fi
 
-# thefuck (command correction) - usage: type "fuck" after failed command
-if [[ -f "$HOME/.local/bin/thefuck" ]]; then
-  eval "$($HOME/.local/bin/thefuck --alias)"
-fi
 
 #=============================================================================
 # User Configuration
@@ -1371,12 +1338,10 @@ print_removal_summary() {
 
   if [[ ${PURGE_DATA} == true ]]; then
     log_info "  - mise binary and data"
-    log_info "  - thefuck"
   else
     log_info ""
     log_info "Preserved (use --purge to remove):"
     log_info "  - mise binary and data"
-    log_info "  - thefuck"
   fi
 
   log_info ""
@@ -1586,7 +1551,7 @@ ${COLORS[bold]}INSTALLATION OPTIONS:${COLORS[reset]}
 
 ${COLORS[bold]}REMOVAL OPTIONS:${COLORS[reset]}
     --remove           Remove shell customization (Antidote, configs)
-    --purge            Also remove mise, thefuck, and their data
+    --purge            Also remove mise and its data
     --force, -f        Skip confirmation prompts
 
 ${COLORS[bold]}GENERAL OPTIONS:${COLORS[reset]}
@@ -1603,7 +1568,6 @@ ${COLORS[bold]}WHAT GETS INSTALLED:${COLORS[reset]}
     - Powerlevel10k theme (ASCII mode)
     - 22 plugins via Antidote (see below)
     - mise version manager (no default tools)
-    - thefuck command correction
     - Configured .zshrc with optimal settings
 
 ${COLORS[bold]}PLUGINS ENABLED (22 total):${COLORS[reset]}
@@ -1737,7 +1701,6 @@ main() {
   install_fzf
   install_antidote
   install_mise
-  install_thefuck
   configure_shell
 
   # Verify
