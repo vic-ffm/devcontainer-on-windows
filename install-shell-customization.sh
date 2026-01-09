@@ -4,7 +4,7 @@
 # install-shell-customization.sh - Shell customization installer/remover for WSL2
 #
 # DESCRIPTION:
-#   Script to install or remove Zsh/Oh-My-Zsh/Powerlevel10k/mise on WSL2 systems.
+#   Script to install or remove Zsh/Antidote/Powerlevel10k/mise on WSL2 systems.
 #
 # REQUIREMENTS:
 #   Bash 5.2+
@@ -20,8 +20,8 @@
 #   --user USERNAME    Configure shell for specified user (default: $SUDO_USER)
 #
 # REMOVAL OPTIONS:
-#   --remove           Remove shell customization (Oh-My-Zsh, configs)
-#   --purge            Also remove mise and its data
+#   --remove           Remove shell customization (Antidote, configs)
+#   --purge            Also remove mise, thefuck, and their data
 #   --force, -f        Skip confirmation prompts
 #
 # GENERAL OPTIONS:
@@ -74,10 +74,7 @@ declare -r LOG_FILE="/var/log/shell-customization-install.log"
 declare -r LOCK_FILE="/var/lock/shell-customization-install.lock"
 
 # Git repository URLs
-declare -r OHMYZSH_REPO="https://github.com/ohmyzsh/ohmyzsh.git"
-declare -r P10K_REPO="https://github.com/romkatv/powerlevel10k.git"
-declare -r ZSH_AUTOSUGGESTIONS_REPO="https://github.com/zsh-users/zsh-autosuggestions.git"
-declare -r ZSH_SYNTAX_HIGHLIGHTING_REPO="https://github.com/zsh-users/zsh-syntax-highlighting.git"
+declare -r ANTIDOTE_REPO="https://github.com/mattmc3/antidote.git"
 declare -r MISE_INSTALL_URL="https://mise.run"
 
 # Network retry configuration
@@ -114,26 +111,6 @@ declare -ra SHELL_PACKAGES=(
   git
 )
 
-# Oh-My-Zsh plugins (built-in)
-declare -ra OMZ_BUILTIN_PLUGINS=(
-  git
-  docker
-  docker-compose
-  z
-  sudo
-  history
-  colored-man-pages
-  copypath
-  copyfile
-  fzf
-)
-
-# External plugins to clone
-declare -rA OMZ_EXTERNAL_PLUGINS=(
-  ["zsh-autosuggestions"]="${ZSH_AUTOSUGGESTIONS_REPO}"
-  ["zsh-syntax-highlighting"]="${ZSH_SYNTAX_HIGHLIGHTING_REPO}"
-)
-
 #-------------------------------------------------------------------------------
 # Global State Variables
 #-------------------------------------------------------------------------------
@@ -158,9 +135,8 @@ declare -A MODIFIED_FILES=()
 
 # User paths (set after validation)
 declare USER_HOME=""
-declare OMZ_DIR=""
-declare OMZ_CUSTOM=""
-declare P10K_DIR=""
+declare ANTIDOTE_DIR=""
+declare ZSH_PLUGINS_FILE=""
 declare ZSHRC_FILE=""
 declare P10K_CONFIG=""
 declare MISE_BIN=""
@@ -712,9 +688,8 @@ validate_user() {
 
   # Set user paths
   USER_HOME=$(getent passwd "${TARGET_USER}" | cut -d: -f6)
-  OMZ_DIR="${USER_HOME}/.oh-my-zsh"
-  OMZ_CUSTOM="${OMZ_DIR}/custom"
-  P10K_DIR="${OMZ_CUSTOM}/themes/powerlevel10k"
+  ANTIDOTE_DIR="${USER_HOME}/.antidote"
+  ZSH_PLUGINS_FILE="${USER_HOME}/.zsh_plugins.txt"
   ZSHRC_FILE="${USER_HOME}/.zshrc"
   P10K_CONFIG="${USER_HOME}/.p10k.zsh"
   MISE_BIN="${USER_HOME}/.local/bin/mise"
@@ -755,7 +730,7 @@ check_network() {
 # Installation Functions
 #-------------------------------------------------------------------------------
 install_zsh() {
-  log_step "1/7" "Installing Zsh"
+  log_step "1/6" "Installing Zsh"
 
   # Check if already installed
   # shellcheck disable=SC2310  # Intentional: idempotency check in conditional
@@ -782,7 +757,7 @@ install_zsh() {
 }
 
 install_fzf() {
-  log_step "2/7" "Installing fzf"
+  log_step "2/6" "Installing fzf"
 
   # Check if already installed
   # shellcheck disable=SC2310  # Intentional: idempotency check in conditional
@@ -808,98 +783,30 @@ install_fzf() {
   fi
 }
 
-install_ohmyzsh() {
-  log_step "3/7" "Installing Oh-My-Zsh"
+install_antidote() {
+  log_step "3/6" "Installing Antidote plugin manager"
 
-  # Check if already installed
-  if [[ -d ${OMZ_DIR} ]]; then
-    log_success "Oh-My-Zsh already installed at ${OMZ_DIR}"
+  if [[ -d ${ANTIDOTE_DIR} ]]; then
+    log_success "Antidote already installed at ${ANTIDOTE_DIR}"
     return 0
   fi
 
-  log_info "Cloning Oh-My-Zsh..."
+  log_info "Cloning Antidote..."
 
   if [[ ${DRY_RUN} == true ]]; then
-    log_info "[DRY-RUN] Would clone Oh-My-Zsh to ${OMZ_DIR}"
+    log_info "[DRY-RUN] Would clone Antidote to ${ANTIDOTE_DIR}"
     return 0
   fi
 
-  # Clone Oh-My-Zsh
   retry_with_backoff "${MAX_RETRIES}" "${RETRY_DELAY_BASE}" \
-    sudo -u "${TARGET_USER}" git clone --depth=1 "${OHMYZSH_REPO}" "${OMZ_DIR}"
+    sudo -u "${TARGET_USER}" git clone --depth=1 "${ANTIDOTE_REPO}" "${ANTIDOTE_DIR}"
 
-  register_created_dir "${OMZ_DIR}"
-
-  # Create custom directories
-  sudo -u "${TARGET_USER}" mkdir -p "${OMZ_CUSTOM}/plugins"
-  sudo -u "${TARGET_USER}" mkdir -p "${OMZ_CUSTOM}/themes"
-
-  log_success "Oh-My-Zsh installed"
-}
-
-install_powerlevel10k() {
-  log_step "4/7" "Installing Powerlevel10k theme"
-
-  # Check if already installed
-  if [[ -d ${P10K_DIR} ]]; then
-    log_success "Powerlevel10k already installed at ${P10K_DIR}"
-    return 0
-  fi
-
-  log_info "Cloning Powerlevel10k..."
-
-  if [[ ${DRY_RUN} == true ]]; then
-    log_info "[DRY-RUN] Would clone Powerlevel10k to ${P10K_DIR}"
-    return 0
-  fi
-
-  # Ensure parent directory exists
-  sudo -u "${TARGET_USER}" mkdir -p "${OMZ_CUSTOM}/themes"
-
-  # Clone Powerlevel10k
-  retry_with_backoff "${MAX_RETRIES}" "${RETRY_DELAY_BASE}" \
-    sudo -u "${TARGET_USER}" git clone --depth=1 "${P10K_REPO}" "${P10K_DIR}"
-
-  register_created_dir "${P10K_DIR}"
-  log_success "Powerlevel10k installed"
-}
-
-install_external_plugins() {
-  log_step "5/7" "Installing external Oh-My-Zsh plugins"
-
-  local plugin_name plugin_repo plugin_dir
-
-  for plugin_name in "${!OMZ_EXTERNAL_PLUGINS[@]}"; do
-    plugin_repo="${OMZ_EXTERNAL_PLUGINS[${plugin_name}]}"
-    plugin_dir="${OMZ_CUSTOM}/plugins/${plugin_name}"
-
-    # Check if already installed
-    if [[ -d ${plugin_dir} ]]; then
-      log_success "${plugin_name} already installed"
-      continue
-    fi
-
-    log_info "Cloning ${plugin_name}..."
-
-    if [[ ${DRY_RUN} == true ]]; then
-      log_info "[DRY-RUN] Would clone ${plugin_name} to ${plugin_dir}"
-      continue
-    fi
-
-    # Ensure parent directory exists
-    sudo -u "${TARGET_USER}" mkdir -p "${OMZ_CUSTOM}/plugins"
-
-    # Clone plugin
-    retry_with_backoff "${MAX_RETRIES}" "${RETRY_DELAY_BASE}" \
-      sudo -u "${TARGET_USER}" git clone --depth=1 "${plugin_repo}" "${plugin_dir}"
-
-    register_created_dir "${plugin_dir}"
-    log_success "${plugin_name} installed"
-  done
+  register_created_dir "${ANTIDOTE_DIR}"
+  log_success "Antidote installed"
 }
 
 install_mise() {
-  log_step "6/7" "Installing mise (version manager)"
+  log_step "4/6" "Installing mise (version manager)"
 
   # Check if already installed
   if [[ -f ${MISE_BIN} ]]; then
@@ -951,8 +858,58 @@ install_mise() {
   log_info "Note: mise does NOT install any default tools - projects define tools via mise.toml"
 }
 
+install_thefuck() {
+  log_step "5/6" "Installing thefuck (command correction)"
+
+  # shellcheck disable=SC2310  # Intentional: idempotency check in conditional
+  if has_command thefuck; then
+    log_success "thefuck already installed"
+    return 0
+  fi
+
+  if [[ ${DRY_RUN} == true ]]; then
+    log_info "[DRY-RUN] Would install thefuck via pip"
+    return 0
+  fi
+
+  execute apt_install python3-dev python3-pip python3-setuptools
+
+  log_info "Installing thefuck via pip..."
+  sudo -u "${TARGET_USER}" pip3 install thefuck --user --break-system-packages 2>/dev/null \
+    || sudo -u "${TARGET_USER}" pip3 install thefuck --user
+
+  local thefuck_bin="${USER_HOME}/.local/bin/thefuck"
+  if [[ -f ${thefuck_bin} ]]; then
+    log_success "thefuck installed"
+  else
+    log_warn "thefuck installation may have failed"
+    log_warn "Users can install later: pip3 install thefuck --user"
+  fi
+}
+
 configure_shell() {
-  log_step "7/7" "Configuring shell environment"
+  log_step "6/6" "Configuring shell environment"
+
+  local -r zshenv_file="${USER_HOME}/.zshenv"
+  # shellcheck disable=SC2312  # Intentional: file check below handles failure gracefully
+  local -r script_dir="$(dirname "$(readlink -f "$0")")"
+
+  # === .zshenv (required for zsh-autocomplete on Debian) ===
+  log_info "Creating .zshenv..."
+  if [[ ${DRY_RUN} == true ]]; then
+    log_info "[DRY-RUN] Would create ${zshenv_file}"
+  else
+    [[ -f ${zshenv_file} ]] && backup_file "${zshenv_file}"
+    cat >"${zshenv_file}" <<'EOF'
+# Skip global compinit - required for zsh-autocomplete on Debian/Ubuntu
+# https://github.com/marlonrichert/zsh-autocomplete#installation
+skip_global_compinit=1
+EOF
+    chown "${TARGET_USER}:${TARGET_USER}" "${zshenv_file}"
+    chmod 644 "${zshenv_file}"
+    register_created_file "${zshenv_file}"
+    log_success ".zshenv created"
+  fi
 
   # === Set Zsh as default shell ===
   log_info "Setting Zsh as default shell for ${TARGET_USER}..."
@@ -976,102 +933,59 @@ configure_shell() {
     fi
   fi
 
+  # === Install .zsh_plugins.txt ===
+  log_info "Installing plugin configuration..."
+  if [[ ${DRY_RUN} == true ]]; then
+    log_info "[DRY-RUN] Would create ${ZSH_PLUGINS_FILE}"
+  else
+    local -r bundled_plugins="${script_dir}/zsh_plugins.txt"
+    if [[ -f ${bundled_plugins} ]]; then
+      [[ -f ${ZSH_PLUGINS_FILE} ]] && backup_file "${ZSH_PLUGINS_FILE}"
+      cp "${bundled_plugins}" "${ZSH_PLUGINS_FILE}"
+      chown "${TARGET_USER}:${TARGET_USER}" "${ZSH_PLUGINS_FILE}"
+      chmod 644 "${ZSH_PLUGINS_FILE}"
+      register_created_file "${ZSH_PLUGINS_FILE}"
+      log_success "Plugin configuration installed"
+    else
+      die "Bundled zsh_plugins.txt not found at ${bundled_plugins}" "${EXIT_INSTALL_FAILED}"
+    fi
+  fi
+
   # === Create .zshrc ===
   log_info "Creating .zshrc..."
 
   if [[ ${DRY_RUN} == true ]]; then
     log_info "[DRY-RUN] Would create ${ZSHRC_FILE}"
   else
-    # Backup existing .zshrc if present
     [[ -f ${ZSHRC_FILE} ]] && backup_file "${ZSHRC_FILE}"
 
-    # Build plugins list
-    local plugins_list=""
-    for plugin in "${OMZ_BUILTIN_PLUGINS[@]}"; do
-      plugins_list+="  ${plugin}\n"
-    done
-    for plugin in "${!OMZ_EXTERNAL_PLUGINS[@]}"; do
-      plugins_list+="  ${plugin}\n"
-    done
-
-    # Write .zshrc
     cat >"${ZSHRC_FILE}" <<'ZSHRC_EOF'
-# Enable Powerlevel10k instant prompt (should stay at top of .zshrc)
+# Powerlevel10k instant prompt (should stay at top of .zshrc)
 if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
   source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
 fi
 
 #=============================================================================
-# Oh-My-Zsh Configuration
+# Antidote Plugin Manager
+# https://antidote.sh/
 #=============================================================================
-export ZSH="$HOME/.oh-my-zsh"
-ZSH_THEME="powerlevel10k/powerlevel10k"
-
-# Uncomment to change auto-update behavior
-# zstyle ':omz:update' mode disabled  # disable automatic updates
-# zstyle ':omz:update' mode auto      # update automatically without asking
-# zstyle ':omz:update' mode reminder  # just remind me to update when it's time
-
-# Uncomment if pasting URLs and other text is messed up
-# DISABLE_MAGIC_FUNCTIONS="true"
-
-# Uncomment to disable auto-setting terminal title
-# DISABLE_AUTO_TITLE="true"
-
-# Uncomment to enable command auto-correction
-# ENABLE_CORRECTION="true"
-
-# Display red dots whilst waiting for completion
-COMPLETION_WAITING_DOTS="true"
-
-# Disable marking untracked files under VCS as dirty (for large repos)
-DISABLE_UNTRACKED_FILES_DIRTY="true"
+source "${ZDOTDIR:-$HOME}/.antidote/antidote.zsh"
+antidote load
 
 #=============================================================================
-# Plugins
-# Standard plugins: $ZSH/plugins/
-# Custom plugins: $ZSH_CUSTOM/plugins/
-# NOTE: zsh-syntax-highlighting MUST be last
+# Plugin Configuration
 #=============================================================================
-plugins=(
-  # Built-in plugins
-  git
-  docker
-  docker-compose
-  z
-  sudo
-  history
-  colored-man-pages
-  copypath
-  copyfile
-  fzf
-  # External plugins (in ~/.oh-my-zsh/custom/plugins/)
-  zsh-autosuggestions
-  zsh-syntax-highlighting
-)
-
-source $ZSH/oh-my-zsh.sh
-
-#=============================================================================
-# zsh-autosuggestions configuration
-# Ref: https://github.com/zsh-users/zsh-autosuggestions
-#=============================================================================
+# zsh-autosuggestions
 ZSH_AUTOSUGGEST_STRATEGY=(history completion)
 ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE=20
 ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE="fg=#666666"
 ZSH_AUTOSUGGEST_USE_ASYNC=1
 
-#=============================================================================
-# zsh-syntax-highlighting configuration
-# Ref: https://github.com/zsh-users/zsh-syntax-highlighting
-#=============================================================================
+# zsh-syntax-highlighting
 ZSH_HIGHLIGHT_HIGHLIGHTERS=(main brackets)
 ZSH_HIGHLIGHT_MAXLENGTH=512
 
-#=============================================================================
-# fzf configuration
-# Key bindings: Ctrl+R (history), Ctrl+T (files), Alt+C (cd)
-#=============================================================================
+# fzf (Ctrl+R history, Ctrl+T files, Alt+C directories)
 export FZF_DEFAULT_OPTS="--height 40% --layout=reverse --border --info=inline"
 if command -v fd &>/dev/null; then
   export FZF_DEFAULT_COMMAND="fd --type f --hidden --follow --exclude .git"
@@ -1079,36 +993,42 @@ if command -v fd &>/dev/null; then
   export FZF_ALT_C_COMMAND="fd --type d --hidden --follow --exclude .git"
 fi
 
-#=============================================================================
-# z (directory jumping) configuration
-#=============================================================================
+# z (directory jumping)
 export ZSHZ_DATA="${HOME}/.z"
 
+# debian plugin - use apt instead of aptitude
+apt_pref='apt'
+apt_upgr='full-upgrade'
+
 #=============================================================================
-# mise activation (version manager)
+# Tool Initialization
 #=============================================================================
+# mise (version manager)
 if [[ -f "$HOME/.local/bin/mise" ]]; then
   eval "$($HOME/.local/bin/mise activate zsh)"
 fi
 
+# thefuck (command correction) - usage: type "fuck" after failed command
+if [[ -f "$HOME/.local/bin/thefuck" ]]; then
+  eval "$($HOME/.local/bin/thefuck --alias)"
+fi
+
 #=============================================================================
-# User configuration
+# User Configuration
 #=============================================================================
 export EDITOR='vim'
 export VISUAL='vim'
 
-# Preferred editor for local and remote sessions
 if [[ -n $SSH_CONNECTION ]]; then
   export EDITOR='vim'
 else
-  # Use VS Code if available
   if command -v code &>/dev/null; then
     export EDITOR='code --wait'
     export VISUAL='code --wait'
   fi
 fi
 
-# History configuration
+# History
 HISTSIZE=500000
 SAVEHIST=500000
 setopt HIST_IGNORE_ALL_DUPS
@@ -1118,7 +1038,7 @@ setopt AUTO_CD
 setopt AUTO_PUSHD
 
 #=============================================================================
-# Load Powerlevel10k configuration
+# Powerlevel10k Configuration
 #=============================================================================
 [[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
 ZSHRC_EOF
@@ -1135,12 +1055,10 @@ ZSHRC_EOF
   if [[ ${DRY_RUN} == true ]]; then
     log_info "[DRY-RUN] Would copy p10k.zsh to ${P10K_CONFIG}"
   else
-    # Copy bundled p10k.zsh from script directory
-    # shellcheck disable=SC2312  # Intentional: file check below handles failure gracefully
-    local -r script_dir="$(dirname "$(readlink -f "$0")")"
     local -r bundled_p10k="${script_dir}/p10k.zsh"
 
     if [[ -f ${bundled_p10k} ]]; then
+      [[ -f ${P10K_CONFIG} ]] && backup_file "${P10K_CONFIG}"
       cp "${bundled_p10k}" "${P10K_CONFIG}"
       chown "${TARGET_USER}:${TARGET_USER}" "${P10K_CONFIG}"
       chmod 644 "${P10K_CONFIG}"
@@ -1165,15 +1083,15 @@ check_shell_installation() {
 
   local -i found=0
 
-  # Check Oh-My-Zsh
-  if [[ -d ${OMZ_DIR} ]]; then
-    log_info "  Oh-My-Zsh: ${OMZ_DIR}"
+  # Check Antidote
+  if [[ -d ${ANTIDOTE_DIR} ]]; then
+    log_info "  Antidote: ${ANTIDOTE_DIR}"
     ((found++))
   fi
 
-  # Check Powerlevel10k
-  if [[ -d ${P10K_DIR} ]]; then
-    log_info "  Powerlevel10k: ${P10K_DIR}"
+  # Check .zsh_plugins.txt
+  if [[ -f ${ZSH_PLUGINS_FILE} ]]; then
+    log_info "  Plugin config: ${ZSH_PLUGINS_FILE}"
     ((found++))
   fi
 
@@ -1194,15 +1112,6 @@ check_shell_installation() {
     log_info "  mise: ${MISE_BIN}"
     ((found++))
   fi
-
-  # Check external plugins
-  for plugin_name in "${!OMZ_EXTERNAL_PLUGINS[@]}"; do
-    local plugin_dir="${OMZ_CUSTOM}/plugins/${plugin_name}"
-    if [[ -d ${plugin_dir} ]]; then
-      log_info "  Plugin ${plugin_name}: ${plugin_dir}"
-      ((found++))
-    fi
-  done
 
   # Check default shell
   local current_shell
@@ -1240,21 +1149,56 @@ remove_shell_customization() {
     log_info "Default shell is already ${current_shell}"
   fi
 
-  log_step "2/4" "Removing Oh-My-Zsh and plugins"
+  log_step "2/4" "Removing Antidote and plugins"
 
-  if [[ -d ${OMZ_DIR} ]]; then
-    log_info "Removing Oh-My-Zsh directory..."
+  # Remove Antidote directory
+  if [[ -d ${ANTIDOTE_DIR} ]]; then
+    log_info "Removing Antidote directory..."
     if [[ ${DRY_RUN} == true ]]; then
-      log_info "[DRY-RUN] Would remove ${OMZ_DIR}"
+      log_info "[DRY-RUN] Would remove ${ANTIDOTE_DIR}"
     else
-      execute rm -rf "${OMZ_DIR}"
-      log_success "Oh-My-Zsh removed"
+      execute rm -rf "${ANTIDOTE_DIR}"
+      log_success "Antidote removed"
     fi
   else
-    log_info "Oh-My-Zsh not installed"
+    log_info "Antidote not installed"
+  fi
+
+  # Remove Antidote cache (where plugins are stored)
+  local -r antidote_cache="${USER_HOME}/.cache/antidote"
+  if [[ -d ${antidote_cache} ]]; then
+    log_info "Removing Antidote plugin cache..."
+    if [[ ${DRY_RUN} == true ]]; then
+      log_info "[DRY-RUN] Would remove ${antidote_cache}"
+    else
+      execute rm -rf "${antidote_cache}"
+      log_success "Antidote cache removed"
+    fi
   fi
 
   log_step "3/4" "Removing configuration files"
+
+  # Remove .zsh_plugins.txt
+  if [[ -f ${ZSH_PLUGINS_FILE} ]]; then
+    log_info "Removing .zsh_plugins.txt..."
+    if [[ ${DRY_RUN} == true ]]; then
+      log_info "[DRY-RUN] Would remove ${ZSH_PLUGINS_FILE}"
+    else
+      execute rm -f "${ZSH_PLUGINS_FILE}"
+      log_success ".zsh_plugins.txt removed"
+    fi
+  fi
+
+  # Remove compiled plugins file
+  local -r compiled_plugins="${USER_HOME}/.zsh_plugins.zsh"
+  if [[ -f ${compiled_plugins} ]]; then
+    log_info "Removing compiled plugins file..."
+    if [[ ${DRY_RUN} == true ]]; then
+      log_info "[DRY-RUN] Would remove ${compiled_plugins}"
+    else
+      execute rm -f "${compiled_plugins}"
+    fi
+  fi
 
   # Remove .zshrc
   if [[ -f ${ZSHRC_FILE} ]]; then
@@ -1286,6 +1230,18 @@ remove_shell_customization() {
       log_info "[DRY-RUN] Would remove ${z_data}"
     else
       execute rm -f "${z_data}"
+    fi
+  fi
+
+  # Remove .zshenv (created for zsh-autocomplete)
+  local -r zshenv_file="${USER_HOME}/.zshenv"
+  if [[ -f ${zshenv_file} ]]; then
+    log_info "Removing .zshenv..."
+    if [[ ${DRY_RUN} == true ]]; then
+      log_info "[DRY-RUN] Would remove ${zshenv_file}"
+    else
+      execute rm -f "${zshenv_file}"
+      log_success ".zshenv removed"
     fi
   fi
 
@@ -1333,12 +1289,20 @@ verify_removal() {
 
   local -i issues=0
 
-  # Check Oh-My-Zsh removed
-  if [[ -d ${OMZ_DIR} ]]; then
-    log_error "Oh-My-Zsh still present: ${OMZ_DIR}"
+  # Check Antidote removed
+  if [[ -d ${ANTIDOTE_DIR} ]]; then
+    log_error "Antidote still present: ${ANTIDOTE_DIR}"
     ((issues++))
   else
-    log_success "Oh-My-Zsh removed"
+    log_success "Antidote removed"
+  fi
+
+  # Check .zsh_plugins.txt removed
+  if [[ -f ${ZSH_PLUGINS_FILE} ]]; then
+    log_error ".zsh_plugins.txt still present: ${ZSH_PLUGINS_FILE}"
+    ((issues++))
+  else
+    log_success ".zsh_plugins.txt removed"
   fi
 
   # Check .zshrc removed
@@ -1398,18 +1362,21 @@ print_removal_summary() {
 
   log_info ""
   log_info "Removed:"
-  log_info "  - Oh-My-Zsh directory"
-  log_info "  - Powerlevel10k theme"
-  log_info "  - External plugins (zsh-autosuggestions, zsh-syntax-highlighting)"
-  log_info "  - Shell configuration files (.zshrc, .p10k.zsh)"
+  log_info "  - Antidote plugin manager"
+  log_info "  - Antidote plugin cache"
+  log_info "  - Plugin configuration (.zsh_plugins.txt, .zsh_plugins.zsh)"
+  log_info "  - Shell configuration files (.zshrc, .p10k.zsh, .zshenv)"
+  log_info "  - z directory database (.z)"
   log_info "  - Default shell restored to bash"
 
   if [[ ${PURGE_DATA} == true ]]; then
     log_info "  - mise binary and data"
+    log_info "  - thefuck"
   else
     log_info ""
     log_info "Preserved (use --purge to remove):"
     log_info "  - mise binary and data"
+    log_info "  - thefuck"
   fi
 
   log_info ""
@@ -1505,7 +1472,7 @@ verify_installation() {
   fi
 
   local -i passed=0
-  local -i total=8
+  local -i total=6
 
   # 1. Zsh installed
   # shellcheck disable=SC2310  # Intentional: verification check in conditional
@@ -1529,39 +1496,23 @@ verify_installation() {
     log_error "fzf: not installed"
   fi
 
-  # 3. Oh-My-Zsh installed
-  if [[ -d ${OMZ_DIR} ]]; then
-    log_success "Oh-My-Zsh: installed"
+  # 3. Antidote installed
+  if [[ -d ${ANTIDOTE_DIR} ]]; then
+    log_success "Antidote: installed"
     ((passed++))
   else
-    log_error "Oh-My-Zsh: not found"
+    log_error "Antidote: not found"
   fi
 
-  # 4. Powerlevel10k installed
-  if [[ -d ${P10K_DIR} ]]; then
-    log_success "Powerlevel10k: installed"
+  # 4. Plugin configuration exists
+  if [[ -f ${ZSH_PLUGINS_FILE} ]]; then
+    log_success "Plugin config: ${ZSH_PLUGINS_FILE}"
     ((passed++))
   else
-    log_error "Powerlevel10k: not found"
+    log_error "Plugin config: not found"
   fi
 
-  # 5. zsh-autosuggestions installed
-  if [[ -d "${OMZ_CUSTOM}/plugins/zsh-autosuggestions" ]]; then
-    log_success "zsh-autosuggestions: installed"
-    ((passed++))
-  else
-    log_error "zsh-autosuggestions: not found"
-  fi
-
-  # 6. zsh-syntax-highlighting installed
-  if [[ -d "${OMZ_CUSTOM}/plugins/zsh-syntax-highlighting" ]]; then
-    log_success "zsh-syntax-highlighting: installed"
-    ((passed++))
-  else
-    log_error "zsh-syntax-highlighting: not found"
-  fi
-
-  # 7. mise installed
+  # 5. mise installed
   if [[ -f ${MISE_BIN} ]]; then
     local mise_ver
     mise_ver=$(sudo -u "${TARGET_USER}" "${MISE_BIN}" --version 2>/dev/null) || mise_ver="unknown"
@@ -1573,7 +1524,7 @@ verify_installation() {
     ((passed++))
   fi
 
-  # 8. Default shell is zsh
+  # 6. Default shell is zsh
   local current_shell
   current_shell=$(getent passwd "${TARGET_USER}" | cut -d: -f7)
   if [[ ${current_shell} == *zsh ]]; then
@@ -1599,14 +1550,17 @@ print_summary() {
 
   log_info ""
   log_info "User:          ${TARGET_USER}"
-  log_info "Shell:         zsh with Oh-My-Zsh + Powerlevel10k"
+  log_info "Shell:         zsh with Antidote + Powerlevel10k"
   log_info "Theme:         powerlevel10k (ASCII mode)"
-  log_info "Plugins:       ${#OMZ_BUILTIN_PLUGINS[@]} built-in + ${#OMZ_EXTERNAL_PLUGINS[@]} external"
+  log_info "Plugins:       22 total (see below)"
   log_info "Log file:      ${LOG_FILE}"
   log_info ""
-  log_info "Installed plugins:"
-  log_info "  Built-in: ${OMZ_BUILTIN_PLUGINS[*]}"
-  log_info "  External: ${!OMZ_EXTERNAL_PLUGINS[*]}"
+  log_info "Installed plugins (22 total):"
+  log_info "  Core (immediate):     git, debian, z, sudo, history, colored-man-pages,"
+  log_info "                        copypath, copyfile, fzf, systemd"
+  log_info "  Dev tools (deferred): docker, deno, bun, rust, azure, gh"
+  log_info "  External:             zsh-autocomplete, zsh-autosuggestions,"
+  log_info "                        zsh-syntax-highlighting, powerlevel10k"
   log_info ""
   log_info "Key bindings:"
   log_info "  Ctrl+R  - fzf history search"
@@ -1631,8 +1585,8 @@ ${COLORS[bold]}INSTALLATION OPTIONS:${COLORS[reset]}
     --user USERNAME    Configure shell for specified user (default: \$SUDO_USER)
 
 ${COLORS[bold]}REMOVAL OPTIONS:${COLORS[reset]}
-    --remove           Remove shell customization (Oh-My-Zsh, configs)
-    --purge            Also remove mise and its data
+    --remove           Remove shell customization (Antidote, configs)
+    --purge            Also remove mise, thefuck, and their data
     --force, -f        Skip confirmation prompts
 
 ${COLORS[bold]}GENERAL OPTIONS:${COLORS[reset]}
@@ -1645,16 +1599,19 @@ ${COLORS[bold]}GENERAL OPTIONS:${COLORS[reset]}
 ${COLORS[bold]}WHAT GETS INSTALLED:${COLORS[reset]}
     - Zsh (from apt)
     - fzf (from apt)
-    - Oh-My-Zsh (from GitHub)
+    - Antidote plugin manager (from GitHub)
     - Powerlevel10k theme (ASCII mode)
-    - External plugins: zsh-autosuggestions, zsh-syntax-highlighting
+    - 22 plugins via Antidote (see below)
     - mise version manager (no default tools)
+    - thefuck command correction
     - Configured .zshrc with optimal settings
 
-${COLORS[bold]}PLUGINS ENABLED:${COLORS[reset]}
-    Built-in: git, docker, docker-compose, z, sudo, history,
-              colored-man-pages, copypath, copyfile, fzf
-    External: zsh-autosuggestions, zsh-syntax-highlighting
+${COLORS[bold]}PLUGINS ENABLED (22 total):${COLORS[reset]}
+    Core (immediate): git, debian, z, sudo, history, colored-man-pages,
+                      copypath, copyfile, fzf, systemd
+    Dev (deferred):   docker, deno, bun, rust, azure, gh
+    External:         zsh-autocomplete, zsh-autosuggestions,
+                      zsh-syntax-highlighting, powerlevel10k
 
 ${COLORS[bold]}EXAMPLES:${COLORS[reset]}
     # Install shell customization
@@ -1778,10 +1735,9 @@ main() {
   # Installation
   install_zsh
   install_fzf
-  install_ohmyzsh
-  install_powerlevel10k
-  install_external_plugins
+  install_antidote
   install_mise
+  install_thefuck
   configure_shell
 
   # Verify

@@ -1,0 +1,39 @@
+# =============================================================================
+# Antidote Plugin Configuration
+# https://antidote.sh/
+#
+# To add OMZ plugins: ohmyzsh/ohmyzsh path:plugins/PLUGIN_NAME
+# Full list: https://github.com/ohmyzsh/ohmyzsh/tree/master/plugins
+# =============================================================================
+
+# Foundation (load first)
+marlonrichert/zsh-autocomplete
+getantidote/use-omz
+ohmyzsh/ohmyzsh path:lib
+
+# OMZ Core Plugins (10) - Immediate
+ohmyzsh/ohmyzsh path:plugins/git
+ohmyzsh/ohmyzsh path:plugins/debian
+ohmyzsh/ohmyzsh path:plugins/z
+ohmyzsh/ohmyzsh path:plugins/sudo
+ohmyzsh/ohmyzsh path:plugins/history
+ohmyzsh/ohmyzsh path:plugins/colored-man-pages
+ohmyzsh/ohmyzsh path:plugins/copypath
+ohmyzsh/ohmyzsh path:plugins/copyfile
+ohmyzsh/ohmyzsh path:plugins/fzf
+ohmyzsh/ohmyzsh path:plugins/systemd
+
+# OMZ Dev Tool Plugins (6) - Deferred for faster startup
+ohmyzsh/ohmyzsh path:plugins/docker kind:defer
+ohmyzsh/ohmyzsh path:plugins/deno kind:defer
+ohmyzsh/ohmyzsh path:plugins/bun kind:defer
+ohmyzsh/ohmyzsh path:plugins/rust kind:defer
+ohmyzsh/ohmyzsh path:plugins/azure kind:defer
+ohmyzsh/ohmyzsh path:plugins/gh kind:defer
+
+# External Plugins (syntax-highlighting MUST be last before theme)
+zsh-users/zsh-autosuggestions
+zsh-users/zsh-syntax-highlighting
+
+# Theme
+romkatv/powerlevel10k
