@@ -7,7 +7,10 @@
 # =============================================================================
 
 # Foundation (load first)
-marlonrichert/zsh-autocomplete
+# OPTIONAL: zsh-autocomplete - real-time interactive completions
+# To enable: 1) Uncomment the line below
+#            2) Add to ~/.zshenv: skip_global_compinit=1
+# marlonrichert/zsh-autocomplete
 getantidote/use-omz
 ohmyzsh/ohmyzsh path:lib
 

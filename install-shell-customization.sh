@@ -861,26 +861,8 @@ install_mise() {
 configure_shell() {
   log_step "5/5" "Configuring shell environment"
 
-  local -r zshenv_file="${USER_HOME}/.zshenv"
   # shellcheck disable=SC2312  # Intentional: file check below handles failure gracefully
   local -r script_dir="$(dirname "$(readlink -f "$0")")"
-
-  # === .zshenv (required for zsh-autocomplete on Debian) ===
-  log_info "Creating .zshenv..."
-  if [[ ${DRY_RUN} == true ]]; then
-    log_info "[DRY-RUN] Would create ${zshenv_file}"
-  else
-    [[ -f ${zshenv_file} ]] && backup_file "${zshenv_file}"
-    cat >"${zshenv_file}" <<'EOF'
-# Skip global compinit - required for zsh-autocomplete on Debian/Ubuntu
-# https://github.com/marlonrichert/zsh-autocomplete#installation
-skip_global_compinit=1
-EOF
-    chown "${TARGET_USER}:${TARGET_USER}" "${zshenv_file}"
-    chmod 644 "${zshenv_file}"
-    register_created_file "${zshenv_file}"
-    log_success ".zshenv created"
-  fi
 
   # === Set Zsh as default shell ===
   log_info "Setting Zsh as default shell for ${TARGET_USER}..."
@@ -1200,18 +1182,6 @@ remove_shell_customization() {
     fi
   fi
 
-  # Remove .zshenv (created for zsh-autocomplete)
-  local -r zshenv_file="${USER_HOME}/.zshenv"
-  if [[ -f ${zshenv_file} ]]; then
-    log_info "Removing .zshenv..."
-    if [[ ${DRY_RUN} == true ]]; then
-      log_info "[DRY-RUN] Would remove ${zshenv_file}"
-    else
-      execute rm -f "${zshenv_file}"
-      log_success ".zshenv removed"
-    fi
-  fi
-
   log_step "4/4" "Handling mise"
 
   if [[ ${PURGE_DATA} == true ]]; then
@@ -1332,7 +1302,7 @@ print_removal_summary() {
   log_info "  - Antidote plugin manager"
   log_info "  - Antidote plugin cache"
   log_info "  - Plugin configuration (.zsh_plugins.txt, .zsh_plugins.zsh)"
-  log_info "  - Shell configuration files (.zshrc, .p10k.zsh, .zshenv)"
+  log_info "  - Shell configuration files (.zshrc, .p10k.zsh)"
   log_info "  - z directory database (.z)"
   log_info "  - Default shell restored to bash"
 
@@ -1517,15 +1487,16 @@ print_summary() {
   log_info "User:          ${TARGET_USER}"
   log_info "Shell:         zsh with Antidote + Powerlevel10k"
   log_info "Theme:         powerlevel10k (ASCII mode)"
-  log_info "Plugins:       22 total (see below)"
+  log_info "Plugins:       21 total (see below)"
   log_info "Log file:      ${LOG_FILE}"
   log_info ""
-  log_info "Installed plugins (22 total):"
+  log_info "Installed plugins (21 total):"
   log_info "  Core (immediate):     git, debian, z, sudo, history, colored-man-pages,"
   log_info "                        copypath, copyfile, fzf, systemd"
   log_info "  Dev tools (deferred): docker, deno, bun, rust, azure, gh"
-  log_info "  External:             zsh-autocomplete, zsh-autosuggestions,"
-  log_info "                        zsh-syntax-highlighting, powerlevel10k"
+  log_info "  External:             zsh-autosuggestions, zsh-syntax-highlighting,"
+  log_info "                        powerlevel10k"
+  log_info "  Optional:             zsh-autocomplete (disabled by default)"
   log_info ""
   log_info "Key bindings:"
   log_info "  Ctrl+R  - fzf history search"
@@ -1566,16 +1537,16 @@ ${COLORS[bold]}WHAT GETS INSTALLED:${COLORS[reset]}
     - fzf (from apt)
     - Antidote plugin manager (from GitHub)
     - Powerlevel10k theme (ASCII mode)
-    - 22 plugins via Antidote (see below)
+    - 21 plugins via Antidote (see below)
     - mise version manager (no default tools)
     - Configured .zshrc with optimal settings
 
-${COLORS[bold]}PLUGINS ENABLED (22 total):${COLORS[reset]}
+${COLORS[bold]}PLUGINS ENABLED (21 total):${COLORS[reset]}
     Core (immediate): git, debian, z, sudo, history, colored-man-pages,
                       copypath, copyfile, fzf, systemd
     Dev (deferred):   docker, deno, bun, rust, azure, gh
-    External:         zsh-autocomplete, zsh-autosuggestions,
-                      zsh-syntax-highlighting, powerlevel10k
+    External:         zsh-autosuggestions, zsh-syntax-highlighting, powerlevel10k
+    Optional:         zsh-autocomplete (disabled by default, enable in ~/.zsh_plugins.txt)
 
 ${COLORS[bold]}EXAMPLES:${COLORS[reset]}
     # Install shell customization
