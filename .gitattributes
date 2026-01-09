@@ -4,6 +4,8 @@
 # Enforce LF for other Linux-specific files
 *.conf text eol=lf
 *.service text eol=lf
+*.zsh text eol=lf
+zsh_plugins.txt text eol=lf
 
 # Windows files keep CRLF
 *.ps1 text eol=crlf

@@ -796,6 +796,7 @@ function Initialize-WslDistro {
     $githubScript = Join-Path $scriptDir "install-github-cli.sh"
     $shellScript = Join-Path $scriptDir "install-shell-customization.sh"
     $p10kConfig = Join-Path $scriptDir "p10k.zsh"
+    $zshPluginsConfig = Join-Path $scriptDir "zsh_plugins.txt"
 
     if (-not (Test-Path $setupScript)) {
         Exit-WithError "setup-wsl-devcontainers.sh not found at: $setupScript" $script:EXIT_GENERAL_ERROR
@@ -818,6 +819,11 @@ function Initialize-WslDistro {
     $hasP10kConfig = Test-Path $p10kConfig
     if ($hasShellScript -and -not $hasP10kConfig) {
         Write-LogWarn "p10k.zsh not found - Default Powerlevel10k config will be generated"
+    }
+
+    $hasZshPluginsConfig = Test-Path $zshPluginsConfig
+    if ($hasShellScript -and -not $hasZshPluginsConfig) {
+        Write-LogWarn "zsh_plugins.txt not found - Shell customization may fail"
     }
 
     if ($DryRun) {
@@ -883,6 +889,11 @@ function Initialize-WslDistro {
                 $p10kBytes = [System.IO.File]::ReadAllBytes($p10kConfig)
             }
 
+            $zshPluginsBytes = $null
+            if ($hasZshPluginsConfig) {
+                $zshPluginsBytes = [System.IO.File]::ReadAllBytes($zshPluginsConfig)
+            }
+
             Write-LogDebug "Setup script: $($setupBytes.Length) bytes"
             Write-LogDebug "Docker script: $($dockerBytes.Length) bytes"
             if ($githubBytes) {
@@ -893,6 +904,9 @@ function Initialize-WslDistro {
             }
             if ($p10kBytes) {
                 Write-LogDebug "P10k config: $($p10kBytes.Length) bytes"
+            }
+            if ($zshPluginsBytes) {
+                Write-LogDebug "Zsh plugins config: $($zshPluginsBytes.Length) bytes"
             }
 
             # Write files to temp directory
@@ -917,6 +931,12 @@ function Initialize-WslDistro {
             if ($p10kBytes) {
                 $tempP10kPath = Join-Path $tempDir "p10k.zsh"
                 [System.IO.File]::WriteAllBytes($tempP10kPath, $p10kBytes)
+            }
+
+            $tempZshPluginsPath = $null
+            if ($zshPluginsBytes) {
+                $tempZshPluginsPath = Join-Path $tempDir "zsh_plugins.txt"
+                [System.IO.File]::WriteAllBytes($tempZshPluginsPath, $zshPluginsBytes)
             }
 
             # Convert Windows path to WSL path 
@@ -953,6 +973,13 @@ function Initialize-WslDistro {
                 wsl -d $WslDistroName -u root -- sh -c "cat '$wslTempDir/p10k.zsh' | tr -d '\r' > /tmp/p10k.zsh"
                 if ($LASTEXITCODE -ne 0) {
                     Write-LogWarn "Failed to copy p10k.zsh to WSL"
+                }
+            }
+
+            if ($tempZshPluginsPath) {
+                wsl -d $WslDistroName -u root -- sh -c "cat '$wslTempDir/zsh_plugins.txt' | tr -d '\r' > /tmp/zsh_plugins.txt"
+                if ($LASTEXITCODE -ne 0) {
+                    Write-LogWarn "Failed to copy zsh_plugins.txt to WSL"
                 }
             }
 
