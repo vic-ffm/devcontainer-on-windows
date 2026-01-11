@@ -1020,16 +1020,42 @@ EOF
   cat >>"${integration_file}" <<'SSH_AGENT_EOF'
 # SSH Agent for DevContainers
 # Socket path is predictable for mounting into containers
+# This works around WSL2 systemd user session issues where sockets aren't created
 _ssh_agent_socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ssh-agent.socket"
+_ssh_key_file="${HOME}/.ssh/id_ed25519_github"
+
+_ensure_ssh_agent() {
+    # Test if agent is accessible
+    # ssh-add -l exit codes: 0=keys listed, 1=no keys but connected, 2=can't connect
+    if [[ -S "${_ssh_agent_socket}" ]]; then
+        SSH_AUTH_SOCK="${_ssh_agent_socket}" ssh-add -l &>/dev/null
+        local exit_code=$?
+        if [[ $exit_code -ne 2 ]]; then
+            # Agent is running and accessible (exit 0 or 1)
+            return 0
+        fi
+        # Socket exists but agent not responding - remove stale socket
+        rm -f "${_ssh_agent_socket}" 2>/dev/null
+    fi
+
+    # Start new ssh-agent with predictable socket path
+    eval "$(ssh-agent -a "${_ssh_agent_socket}" 2>/dev/null)" >/dev/null
+
+    # Add SSH key if it exists (ssh-add is idempotent)
+    if [[ -f "${_ssh_key_file}" ]]; then
+        ssh-add "${_ssh_key_file}" 2>/dev/null
+    fi
+}
+
+_ensure_ssh_agent
+
+# Export SSH_AUTH_SOCK if socket was created successfully
 if [[ -S "${_ssh_agent_socket}" ]]; then
     export SSH_AUTH_SOCK="${_ssh_agent_socket}"
-    # Ensure systemd user environment has SSH_AUTH_SOCK for non-interactive access
-    # (handles cases where user logs in before service fully starts)
-    if command -v systemctl &>/dev/null; then
-        systemctl --user set-environment SSH_AUTH_SOCK="${_ssh_agent_socket}" 2>/dev/null || true
-    fi
 fi
-unset _ssh_agent_socket
+
+unset _ssh_agent_socket _ssh_key_file
+unset -f _ensure_ssh_agent
 
 SSH_AGENT_EOF
 

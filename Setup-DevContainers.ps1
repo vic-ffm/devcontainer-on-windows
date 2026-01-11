@@ -1421,8 +1421,20 @@ function Install-MesloLGSNFFont {
     foreach ($fontPath in $fontsFound) {
         $fontFileName = [System.IO.Path]::GetFileName($fontPath)
         $destPath = Join-Path $systemFontsPath $fontFileName
+        $shell = $null  # Initialize before try block for finally cleanup
 
         try {
+            # Check if font is already installed (same size = likely same file)
+            if (Test-Path $destPath) {
+                $sourceSize = (Get-Item $fontPath).Length
+                $destSize = (Get-Item $destPath).Length
+                if ($sourceSize -eq $destSize) {
+                    Write-LogDebug "Font already installed: $fontFileName"
+                    $installedCount++
+                    continue
+                }
+            }
+
             # Copy font file to system fonts folder
             Copy-Item -Path $fontPath -Destination $destPath -Force -ErrorAction Stop
             Write-LogDebug "Copied font to: $destPath"
@@ -1449,8 +1461,8 @@ function Install-MesloLGSNFFont {
             Write-LogWarn "Failed to install font $fontFileName : $_"
         }
         finally {
-            # Release COM object
-            if ($shell) {
+            # Release COM object if it was created
+            if ($null -ne $shell) {
                 [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
             }
         }
@@ -2013,6 +2025,18 @@ function Main {
         else {
             Write-LogSuccess "VS Code integration verified: $codeTest"
         }
+    }
+
+    # Restart WSL to ensure clean systemd initialization on next boot
+    # This is critical for systemd user services (like ssh-agent) to work properly
+    Write-LogInfo "Finalizing WSL configuration..."
+    if (-not $DryRun) {
+        wsl --shutdown 2>$null
+        Start-Sleep -Seconds 2
+        Write-LogSuccess "WSL restarted - systemd will initialize fresh on next launch"
+    }
+    else {
+        Write-LogInfo "[DRY-RUN] Would restart WSL for clean systemd initialization"
     }
 
     # Clear saved state on success
