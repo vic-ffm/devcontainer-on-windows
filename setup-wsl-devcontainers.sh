@@ -838,6 +838,12 @@ SERVICE_EOF
     local -r socket_path="${runtime_dir}/ssh-agent.socket"
     if [[ -S "${socket_path}" ]]; then
       log_success "SSH agent socket created: ${socket_path}"
+
+      # Export SSH_AUTH_SOCK to systemd user environment for non-interactive access
+      # This makes the variable available to VS Code Remote and other non-shell processes
+      sudo -u "${username}" XDG_RUNTIME_DIR="${runtime_dir}" \
+        systemctl --user set-environment SSH_AUTH_SOCK="${socket_path}" 2>/dev/null || true
+      log_debug "Exported SSH_AUTH_SOCK to systemd user environment"
     else
       log_warn "SSH agent socket not found (may appear after WSL restart)"
     fi
@@ -941,6 +947,11 @@ EOF
 _ssh_agent_socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ssh-agent.socket"
 if [[ -S "${_ssh_agent_socket}" ]]; then
     export SSH_AUTH_SOCK="${_ssh_agent_socket}"
+    # Ensure systemd user environment has SSH_AUTH_SOCK for non-interactive access
+    # (handles cases where user logs in before service fully starts)
+    if command -v systemctl &>/dev/null; then
+        systemctl --user set-environment SSH_AUTH_SOCK="${_ssh_agent_socket}" 2>/dev/null || true
+    fi
 fi
 unset _ssh_agent_socket
 
