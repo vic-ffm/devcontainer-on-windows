@@ -32,6 +32,7 @@
 #===============================================================================
 
 #Requires -Version 5.1
+#Requires -RunAsAdministrator
 
 [CmdletBinding()]
 param(
@@ -64,8 +65,9 @@ param(
 #-------------------------------------------------------------------------------
 # Strict Mode
 #-------------------------------------------------------------------------------
-Set-StrictMode -Version Latest
+Set-StrictMode -Version 3.0  # Explicit version for deterministic behavior
 $ErrorActionPreference = 'Stop'
+$script:OriginalProgressPreference = $ProgressPreference
 $ProgressPreference = 'SilentlyContinue' 
 
 #-------------------------------------------------------------------------------
@@ -76,7 +78,11 @@ $script:SCRIPT_VERSION = "1.0.0"
 $script:LOG_DIR = "$env:LOCALAPPDATA\DevContainersSetup"
 $script:LOG_FILE = "$script:LOG_DIR\setup.log"
 $script:STATE_REG_PATH = "HKCU:\Software\DevContainersSetup"
-$script:LOCK_FILE = "$env:TEMP\devcontainers-setup.lock"
+$script:RESUME_TASK_NAME = "DevContainersSetup_Resume"
+
+# Mutex for preventing concurrent execution
+$script:SETUP_MUTEX_NAME = "Global\DevContainersSetup_Mutex"
+$script:SetupMutex = $null
 
 # Exit codes 
 $script:EXIT_SUCCESS = 0
@@ -260,6 +266,178 @@ function Get-Confirmation {
 }
 
 #-------------------------------------------------------------------------------
+# Script Locking (prevent concurrent execution)
+#-------------------------------------------------------------------------------
+function Enter-ScriptLock {
+    <#
+    .SYNOPSIS
+    Acquires an exclusive lock to prevent concurrent script execution.
+    .OUTPUTS
+    Returns $true if lock acquired, $false if another instance is running.
+    #>
+    try {
+        $createdNew = $false
+        $script:SetupMutex = New-Object System.Threading.Mutex($true, $script:SETUP_MUTEX_NAME, [ref]$createdNew)
+
+        if (-not $createdNew) {
+            # Mutex exists, try to acquire it with timeout
+            $acquired = $script:SetupMutex.WaitOne(0)  # Non-blocking
+            if (-not $acquired) {
+                Write-LogError "Another instance of DevContainers Setup is already running"
+                return $false
+            }
+        }
+
+        Write-LogDebug "Acquired exclusive script lock"
+        return $true
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # Previous instance crashed without releasing - we now own it
+        Write-LogDebug "Acquired abandoned script lock (previous instance crashed)"
+        return $true
+    }
+    catch {
+        Write-LogWarn "Could not acquire script lock: $_"
+        # Allow script to run anyway - lock is a safety feature, not critical
+        return $true
+    }
+}
+
+function Exit-ScriptLock {
+    <#
+    .SYNOPSIS
+    Releases the exclusive lock when script completes.
+    #>
+    if ($script:SetupMutex) {
+        try {
+            $script:SetupMutex.ReleaseMutex()
+            $script:SetupMutex.Dispose()
+            Write-LogDebug "Released script lock"
+        }
+        catch {
+            # Ignore errors during cleanup
+        }
+        $script:SetupMutex = $null
+    }
+}
+
+#-------------------------------------------------------------------------------
+# Virtualization Check
+#-------------------------------------------------------------------------------
+function Test-VirtualizationEnabled {
+    <#
+    .SYNOPSIS
+    Checks if hardware virtualization is enabled in BIOS/UEFI.
+    .OUTPUTS
+    Returns hashtable with Enabled (bool) and Message (string).
+    #>
+    try {
+        $cpu = Get-CimInstance -ClassName Win32_Processor
+        if ($cpu.VirtualizationFirmwareEnabled -eq $false) {
+            return @{
+                Enabled = $false
+                Message = "Hardware virtualization is disabled in BIOS/UEFI. Enable VT-x/AMD-V."
+            }
+        }
+
+        return @{ Enabled = $true; Message = "Virtualization enabled" }
+    }
+    catch {
+        # Can't verify - assume enabled and let WSL fail with its own error if not
+        return @{ Enabled = $true; Message = "Could not verify virtualization (assuming enabled)" }
+    }
+}
+
+#-------------------------------------------------------------------------------
+# WSL Command Helpers (robust UTF-16 handling and timeout support)
+#-------------------------------------------------------------------------------
+function Invoke-WslCommand {
+    <#
+    .SYNOPSIS
+    Executes a WSL command with proper UTF-16 encoding handling.
+    .OUTPUTS
+    Returns hashtable with ExitCode, Output, and Success properties.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Arguments,
+        [string]$Distro
+    )
+
+    $origEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+
+        $wslArgs = @()
+        if ($Distro) {
+            $wslArgs += @("-d", $Distro)
+        }
+        $wslArgs += $Arguments
+
+        $output = & wsl.exe @wslArgs 2>&1
+        $exitCode = $LASTEXITCODE
+
+        return @{
+            ExitCode = $exitCode
+            Output   = ($output | Out-String) -replace '\x00', '' -replace '\r', ''
+            Success  = ($exitCode -eq 0)
+        }
+    }
+    finally {
+        [Console]::OutputEncoding = $origEncoding
+    }
+}
+
+function Invoke-WslWithTimeout {
+    <#
+    .SYNOPSIS
+    Executes a WSL command with timeout protection for long-running commands.
+    .OUTPUTS
+    Returns hashtable with ExitCode, Output, Error, and Success properties.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Arguments,
+        [string]$Distro,
+        [int]$TimeoutSeconds = 120
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "wsl.exe"
+
+    $fullArgs = @()
+    if ($Distro) {
+        $fullArgs += @("-d", $Distro)
+    }
+    $fullArgs += $Arguments
+    $psi.Arguments = $fullArgs -join ' '
+
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::Unicode
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::Unicode
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        $process.Kill()
+        throw "WSL command timed out after $TimeoutSeconds seconds: wsl $($fullArgs -join ' ')"
+    }
+
+    $stdout = $process.StandardOutput.ReadToEnd() -replace '\x00', '' -replace '\r', ''
+    $stderr = $process.StandardError.ReadToEnd() -replace '\x00', '' -replace '\r', ''
+
+    return @{
+        ExitCode = $process.ExitCode
+        Output   = $stdout
+        Error    = $stderr
+        Success  = ($process.ExitCode -eq 0)
+    }
+}
+
+#-------------------------------------------------------------------------------
 # State Management (for reboot resume)
 #-------------------------------------------------------------------------------
 function Save-SetupState {
@@ -310,10 +488,17 @@ function Get-SetupState {
 }
 
 function Clear-SetupState {
+    # Clean up scheduled task if it exists
+    $null = schtasks.exe /delete /tn $script:RESUME_TASK_NAME /f 2>&1
+    Write-LogDebug "Cleaned up resume task (if existed)"
+
+    # Clean up registry state
     if (Test-Path $script:STATE_REG_PATH) {
         Remove-Item -Path $script:STATE_REG_PATH -Recurse -Force -ErrorAction SilentlyContinue
-        Write-LogDebug "Cleared saved state"
+        Write-LogDebug "Cleared saved registry state"
     }
+
+    # Note: Mutex lock is released in Exit-ScriptLock called from finally block
 }
 
 function Request-Reboot {
@@ -325,22 +510,44 @@ function Request-Reboot {
     Save-SetupState -Phase $NextPhase -SelectedDistro $SelectedDistro
 
     if ($DryRun) {
-        Write-LogInfo "[DRY-RUN] Would request reboot and set up RunOnce"
+        Write-LogInfo "[DRY-RUN] Would request reboot and schedule resume task"
         return
     }
 
-    # Create RunOnce entry to resume after reboot
     $scriptPath = $PSCommandPath
-    $runOnceCmd = "powershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$scriptPath`" -Resume"
+    $resumeCmd = "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Normal -File `"$scriptPath`" -Resume"
 
-    try {
-        Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce" `
-            -Name "DevContainersSetup" -Value $runOnceCmd
-        Write-LogDebug "Created RunOnce entry for resume"
+    # Method 1: Task Scheduler (works for all users, most reliable)
+    Write-LogDebug "Creating scheduled task for resume..."
+
+    # Delete existing task if present
+    $null = schtasks.exe /delete /tn $script:RESUME_TASK_NAME /f 2>&1
+
+    # Create task to run at next logon with highest privileges
+    # Using /rl HIGHEST ensures admin elevation
+    $taskResult = schtasks.exe /create /tn $script:RESUME_TASK_NAME /tr $resumeCmd /sc ONLOGON /rl HIGHEST /f 2>&1
+    $taskExitCode = $LASTEXITCODE
+
+    if ($taskExitCode -eq 0) {
+        Write-LogDebug "Created scheduled task: $script:RESUME_TASK_NAME"
     }
-    catch {
-        Write-LogWarn "Could not create RunOnce entry: $_"
-        Write-LogWarn "Please run this script again after reboot with -Resume flag"
+    else {
+        Write-LogWarn "Task Scheduler method failed (exit code: $taskExitCode)"
+        Write-LogDebug "Task Scheduler output: $taskResult"
+
+        # Method 2: RunOnce fallback (only works for admin accounts)
+        Write-LogInfo "Attempting RunOnce registry fallback..."
+        try {
+            # Use exclamation prefix to defer deletion until after execution
+            Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce" `
+                -Name "!DevContainersSetup" -Value $resumeCmd -ErrorAction Stop
+            Write-LogDebug "Created RunOnce registry entry"
+            Write-LogWarn "Note: RunOnce only works if logged in as Administrator account"
+        }
+        catch {
+            Write-LogError "Could not create resume mechanism: $_"
+            Write-LogWarn "Please run this script again with -Resume flag after reboot"
+        }
     }
 
     Write-Host ""
@@ -355,8 +562,8 @@ function Request-Reboot {
     if (-not $NonInteractive) {
         $restart = Get-Confirmation -Prompt "Restart now?" -Default $true
         if ($restart) {
-            Write-LogInfo "Restarting computer..."
-            Start-Sleep -Seconds 2
+            Write-LogInfo "Restarting computer in 5 seconds..."
+            Start-Sleep -Seconds 5
             Restart-Computer -Force
         }
     }
@@ -561,8 +768,7 @@ function Enable-WSL2Features {
     if (-not $status.WSLEnabled) {
         Write-LogInfo "Enabling Windows Subsystem for Linux..."
         Invoke-WithDryRun -Description "Enable WSL feature" -ScriptBlock {
-            $result = Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart -WarningAction SilentlyContinue
-            if ($result.RestartNeeded) { $script:needsReboot = $true }
+            $null = Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart -WarningAction SilentlyContinue
         }
         $needsReboot = $true
     }
@@ -570,8 +776,7 @@ function Enable-WSL2Features {
     if (-not $status.VMEnabled) {
         Write-LogInfo "Enabling Virtual Machine Platform..."
         Invoke-WithDryRun -Description "Enable VM Platform feature" -ScriptBlock {
-            $result = Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart -WarningAction SilentlyContinue
-            if ($result.RestartNeeded) { $script:needsReboot = $true }
+            $null = Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart -WarningAction SilentlyContinue
         }
         $needsReboot = $true
     }
@@ -702,7 +907,7 @@ function Install-WslDistro {
             }
 
             if ($wingetId) {
-                $wingetOutput = winget install --id $wingetId --source msstore --accept-source-agreements --accept-package-agreements 2>&1
+                $wingetOutput = winget install --id $wingetId --source msstore --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1
                 $wingetExitCode = $LASTEXITCODE
                 $wingetStr = ($wingetOutput | Out-String)
                 Write-LogInfo "Winget result: exit code = $wingetExitCode"
@@ -868,6 +1073,14 @@ function Initialize-WslDistro {
         Write-LogInfo "Copying setup scripts to WSL..."
 
         $tempDir = Join-Path $env:TEMP "wsl-devcontainers-$(Get-Random)"
+
+        # Validate local drive (required for WSL path conversion)
+        # UNC paths like \\server\share won't work with WSL /mnt/ mapping
+        if ($tempDir -notmatch '^[A-Za-z]:\\') {
+            $tempDir = Join-Path $env:SystemDrive "Temp\wsl-devcontainers-$(Get-Random)"
+            Write-LogWarn "TEMP is not on local drive, using: $tempDir"
+        }
+
         New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
         try {
@@ -1109,7 +1322,7 @@ function Install-WindowsTerminal {
     try {
         $output = winget install --id Microsoft.WindowsTerminal `
             --accept-source-agreements --accept-package-agreements `
-            --silent 2>&1
+            --silent --disable-interactivity 2>&1
 
         if ($LASTEXITCODE -eq 0) {
             Write-LogSuccess "Windows Terminal installed"
@@ -1128,12 +1341,8 @@ function Install-WindowsTerminal {
 function Install-MesloLGSNFFont {
     Write-LogStep "5/7" "Installing MesloLGS NF Font"
 
-    # Get script directory where font files are bundled
-    # $PSScriptRoot is the recommended method for PowerShell 3.0+
-    # It correctly returns the script's directory even when called from within a function
-    # (unlike $MyInvocation.MyCommand.Path which would return the function's info)
     if (-not $PSScriptRoot) {
-        Write-LogWarn "Could not determine script directory (running interactively?)"
+        Write-LogWarn "Could not determine script directory"
         Write-LogWarn "Font installation skipped - run script from file to install fonts"
         return
     }
@@ -1158,31 +1367,63 @@ function Install-MesloLGSNFFont {
     }
 
     if ($DryRun) {
-        Write-LogInfo "[DRY-RUN] Would install $($fontsFound.Count) MesloLGS NF font(s)"
-        Write-LogInfo "[DRY-RUN] Would configure Windows Terminal and VS Code to use MesloLGS NF"
+        Write-LogInfo "[DRY-RUN] Would install $($fontsFound.Count) MesloLGS NF font(s) system-wide"
         return
     }
 
-    Write-LogInfo "Installing $($fontsFound.Count) font file(s)..."
+    Write-LogInfo "Installing $($fontsFound.Count) font file(s) system-wide..."
 
-    try {
-        # Use Shell.Application COM object - modern method since Windows 10 1809
-        # 0x14 = Fonts folder CLSID, automatically handles per-user installation and registry
-        $fontsFolder = (New-Object -ComObject Shell.Application).Namespace(0x14)
+    # System-wide font installation (requires admin, which we have via #Requires)
+    # Since Windows 10 1809, Shell.Application.CopyHere installs to per-user location
+    # For system-wide, we copy to C:\Windows\Fonts and register in HKLM
+    $systemFontsPath = Join-Path $env:windir "Fonts"
+    $regPath = "HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Fonts"
+    $installedCount = 0
 
-        foreach ($fontPath in $fontsFound) {
-            $fontName = Split-Path -Leaf $fontPath
-            Write-LogDebug "Installing font: $fontName"
-            # 0x10 = suppress "replace?" dialog if font already exists
-            $fontsFolder.CopyHere($fontPath, 0x10)
+    foreach ($fontPath in $fontsFound) {
+        $fontFileName = [System.IO.Path]::GetFileName($fontPath)
+        $destPath = Join-Path $systemFontsPath $fontFileName
+
+        try {
+            # Copy font file to system fonts folder
+            Copy-Item -Path $fontPath -Destination $destPath -Force -ErrorAction Stop
+            Write-LogDebug "Copied font to: $destPath"
+
+            # Get font name for registry using Shell COM
+            $shell = New-Object -ComObject Shell.Application
+            $folder = $shell.Namespace([System.IO.Path]::GetDirectoryName($fontPath))
+            $file = $folder.ParseName($fontFileName)
+            $fontTitle = $folder.GetDetailsOf($file, 21)  # Property 21 = Title/Font Name
+
+            if (-not $fontTitle -or $fontTitle -eq "") {
+                # Fallback to filename without extension
+                $fontTitle = [System.IO.Path]::GetFileNameWithoutExtension($fontPath)
+            }
+
+            # Register in system registry (font name + " (TrueType)" -> filename)
+            $regName = "$fontTitle (TrueType)"
+            Set-ItemProperty -Path $regPath -Name $regName -Value $fontFileName -ErrorAction Stop
+            Write-LogDebug "Registered font: $regName -> $fontFileName"
+
+            $installedCount++
         }
+        catch {
+            Write-LogWarn "Failed to install font $fontFileName : $_"
+        }
+        finally {
+            # Release COM object
+            if ($shell) {
+                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
+            }
+        }
+    }
 
-        Write-LogSuccess "MesloLGS NF fonts installed ($($fontsFound.Count) files)"
+    if ($installedCount -gt 0) {
+        Write-LogSuccess "MesloLGS NF fonts installed system-wide ($installedCount files)"
         Write-LogInfo "Note: You may need to restart applications for fonts to appear"
     }
-    catch {
-        Write-LogWarn "Font installation failed: $_"
-        Write-LogWarn "You can manually install fonts by double-clicking the .ttf files"
+    else {
+        Write-LogWarn "No fonts were installed successfully"
     }
 
     # Configure terminals to use the font
@@ -1247,7 +1488,7 @@ function Set-WindowsTerminalFont {
         }
 
         # Write back with proper formatting
-        $settingsJson = $settings | ConvertTo-Json -Depth 100
+        $settingsJson = $settings | ConvertTo-Json -Depth 10
         Set-Content -Path $wtSettingsPath -Value $settingsJson -Encoding UTF8
 
         Write-LogSuccess "Windows Terminal configured to use $($script:MESLO_FONT_NAME)"
@@ -1265,7 +1506,6 @@ function Set-WindowsTerminalFont {
 function Set-VSCodeTerminalFont {
     Write-LogInfo "Configuring VS Code terminal font..."
 
-    # VS Code user settings location
     $vscodeSettingsDir = Join-Path $env:APPDATA "Code\User"
     $vscodeSettingsPath = Join-Path $vscodeSettingsDir "settings.json"
 
@@ -1280,46 +1520,86 @@ function Set-VSCodeTerminalFont {
             New-Item -ItemType Directory -Path $vscodeSettingsDir -Force | Out-Null
         }
 
-        # Read existing settings or create empty object
-        $settings = @{}
-        if (Test-Path $vscodeSettingsPath) {
-            # Backup existing settings
-            $backupPath = "$vscodeSettingsPath.backup"
-            Copy-Item $vscodeSettingsPath $backupPath -Force
-            Write-LogDebug "Backed up VS Code settings to $backupPath"
+        $fontSettingName = 'terminal.integrated.fontFamily'
+        $fontSettingValue = $script:MESLO_FONT_NAME
 
-            $settingsContent = Get-Content $vscodeSettingsPath -Raw -Encoding UTF8
-            if ($settingsContent -and $settingsContent.Trim()) {
-                # Handle JSON with comments (VS Code allows them) - strip them out
-                $cleanContent = $settingsContent -replace '//[^\r\n]*', '' -replace '/\*[\s\S]*?\*/', ''
-                # Remove trailing commas before } or ]
-                $cleanContent = $cleanContent -replace ',(\s*[}\]])', '$1'
-
-                try {
-                    $parsed = $cleanContent | ConvertFrom-Json
-                    # Convert PSCustomObject to hashtable
-                    $parsed.PSObject.Properties | ForEach-Object {
-                        $settings[$_.Name] = $_.Value
-                    }
-                }
-                catch {
-                    Write-LogDebug "Could not parse existing VS Code settings, creating new"
-                    $settings = @{}
-                }
-            }
+        if (-not (Test-Path $vscodeSettingsPath)) {
+            # No existing settings - create minimal file
+            $newSettings = @{ $fontSettingName = $fontSettingValue }
+            $newSettings | ConvertTo-Json -Depth 10 | Set-Content -Path $vscodeSettingsPath -Encoding UTF8
+            Write-LogSuccess "VS Code settings created with $($script:MESLO_FONT_NAME) font"
+            return
         }
 
-        # Set terminal font family
-        $settings['terminal.integrated.fontFamily'] = $script:MESLO_FONT_NAME
+        # Backup existing settings
+        $backupPath = "$vscodeSettingsPath.backup.$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Copy-Item $vscodeSettingsPath $backupPath -Force
+        Write-LogDebug "Backed up VS Code settings to $backupPath"
 
-        # Write back with proper formatting
-        $settingsJson = $settings | ConvertTo-Json -Depth 100
-        Set-Content -Path $vscodeSettingsPath -Value $settingsJson -Encoding UTF8
+        $settingsContent = Get-Content $vscodeSettingsPath -Raw -Encoding UTF8
 
-        Write-LogSuccess "VS Code terminal configured to use $($script:MESLO_FONT_NAME)"
+        if ([string]::IsNullOrWhiteSpace($settingsContent)) {
+            # Empty file - create new
+            $newSettings = @{ $fontSettingName = $fontSettingValue }
+            $newSettings | ConvertTo-Json -Depth 10 | Set-Content -Path $vscodeSettingsPath -Encoding UTF8
+            Write-LogSuccess "VS Code settings created with $($script:MESLO_FONT_NAME) font"
+            return
+        }
+
+        # Try standard JSON parsing first
+        try {
+            $settings = @{}
+            $parsed = $settingsContent | ConvertFrom-Json -ErrorAction Stop
+
+            # Convert PSCustomObject to hashtable
+            $parsed.PSObject.Properties | ForEach-Object {
+                $settings[$_.Name] = $_.Value
+            }
+
+            # Update font setting
+            $settings[$fontSettingName] = $fontSettingValue
+
+            # Write back (depth 10 is safe for VS Code settings)
+            $settingsJson = $settings | ConvertTo-Json -Depth 10
+            Set-Content -Path $vscodeSettingsPath -Value $settingsJson -Encoding UTF8
+
+            Write-LogSuccess "VS Code terminal configured to use $($script:MESLO_FONT_NAME)"
+        }
+        catch {
+            # File contains JSONC (comments) or is malformed
+            # Use safe targeted insertion that doesn't corrupt existing content
+            # NEVER use naive regex to strip comments - it corrupts URLs like https://
+            Write-LogDebug "VS Code settings contains comments or is non-standard JSON, using safe insertion"
+
+            $settingPattern = [regex]::Escape("`"$fontSettingName`"")
+
+            if ($settingsContent -match $settingPattern) {
+                # Setting exists - update it with precise regex
+                $replacePattern = "(`"$([regex]::Escape($fontSettingName))`"\s*:\s*)(`"[^`"]*`"|'[^']*')"
+                $settingsContent = $settingsContent -replace $replacePattern, "`$1`"$fontSettingValue`""
+            }
+            else {
+                # Setting doesn't exist - insert after first {
+                # Find position after opening brace, preserving any comments
+                if ($settingsContent -match '^\s*\{') {
+                    $insertPos = $settingsContent.IndexOf('{') + 1
+                    $indent = "    "
+                    $newSetting = "`n$indent`"$fontSettingName`": `"$fontSettingValue`","
+                    $settingsContent = $settingsContent.Insert($insertPos, $newSetting)
+                }
+                else {
+                    Write-LogWarn "Could not parse VS Code settings structure"
+                    return
+                }
+            }
+
+            Set-Content -Path $vscodeSettingsPath -Value $settingsContent -Encoding UTF8
+            Write-LogSuccess "VS Code terminal configured to use $($script:MESLO_FONT_NAME) (preserved comments)"
+        }
     }
     catch {
         Write-LogWarn "Failed to configure VS Code font: $_"
+        Write-LogWarn "You can manually add: `"terminal.integrated.fontFamily`": `"$($script:MESLO_FONT_NAME)`""
     }
 }
 
@@ -1364,7 +1644,7 @@ function Install-VSCode {
     try {
         $output = winget install --id Microsoft.VisualStudioCode `
             --accept-source-agreements --accept-package-agreements `
-            --silent 2>&1
+            --silent --disable-interactivity 2>&1
 
         if ($LASTEXITCODE -eq 0) {
             Write-LogSuccess "VS Code installed"
@@ -1563,6 +1843,11 @@ function Main {
     # Initialize logging
     Initialize-Logging
 
+    # Acquire exclusive mutex lock (prevents concurrent execution)
+    if (-not (Enter-ScriptLock)) {
+        Exit-WithError "Another instance of this script is already running" $script:EXIT_GENERAL_ERROR
+    }
+
     Write-Host ""
     Write-LogInfo "==============================================================="
     Write-LogInfo "  DevContainers Setup for Windows 11 v$script:SCRIPT_VERSION"
@@ -1573,7 +1858,7 @@ function Main {
         Write-LogWarn "DRY-RUN MODE: No changes will be made"
     }
 
-    # Check for administrator privileges
+    # Check for administrator privileges (also enforced by #Requires -RunAsAdministrator)
     if (-not (Test-Administrator)) {
         Write-Host ""
         Write-LogError "This script requires Administrator privileges."
@@ -1583,6 +1868,13 @@ function Main {
     }
 
     Write-LogSuccess "Running as Administrator"
+
+    # Check BIOS virtualization early
+    $virtCheck = Test-VirtualizationEnabled
+    if (-not $virtCheck.Enabled) {
+        Exit-WithError $virtCheck.Message $script:EXIT_GENERAL_ERROR
+    }
+    Write-LogDebug "Virtualization check: $($virtCheck.Message)"
 
     # Check for resume state
     if ($Resume) {
@@ -1694,7 +1986,7 @@ function Main {
     Write-LogSuccess "Setup completed successfully!"
 }
 
-# Run main function
+# Run main function with cleanup
 try {
     Main
 }
@@ -1702,4 +1994,13 @@ catch {
     Write-LogError "Unexpected error: $_"
     Write-LogError $_.ScriptStackTrace
     exit $script:EXIT_GENERAL_ERROR
+}
+finally {
+    # Release mutex lock
+    Exit-ScriptLock
+
+    # Restore progress preference
+    if ($script:OriginalProgressPreference) {
+        $ProgressPreference = $script:OriginalProgressPreference
+    }
 }

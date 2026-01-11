@@ -89,7 +89,7 @@ if "%FILES_OK%"=="0" (
     echo   %SCRIPT_DIR%
     echo.
     echo Required files:
-    echo   - Setup-DevContainers.bat   [this file]
+    echo   - Double-Click-Me.bat       [this file]
     echo   - Setup-DevContainers.ps1   [PowerShell script]
     echo   - setup-wsl-devcontainers.sh   [Linux setup]
     echo   - install-docker.sh   [Docker installer]
@@ -131,9 +131,9 @@ echo ============================================================
 echo.
 
 REM ============================================================================
-REM Change to script directory
+REM Change to script directory (pushd handles UNC paths by mapping a temp drive)
 REM ============================================================================
-cd /d "%SCRIPT_DIR%"
+pushd "%SCRIPT_DIR%"
 
 REM ============================================================================
 REM Run the PowerShell script
@@ -196,11 +196,13 @@ if %PS_EXIT_CODE% equ 0 (
 goto :end
 
 :error_exit
+set "PS_EXIT_CODE=1"
 echo.
 echo Setup cannot continue. Please fix the errors above.
 echo.
 
 :end
+popd 2>nul
 echo.
 echo Press any key to close this window...
 pause >nul
