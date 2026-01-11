@@ -327,20 +327,52 @@ function Exit-ScriptLock {
 function Test-VirtualizationEnabled {
     <#
     .SYNOPSIS
-    Checks if hardware virtualization is enabled in BIOS/UEFI.
+    Checks if hardware virtualization is enabled and available.
+    .DESCRIPTION
+    Uses multiple detection methods because:
+    - When hypervisor is already running (WSL2, Hyper-V), VirtualizationFirmwareEnabled
+      returns false even though virtualization IS working
+    - HypervisorPresent = true means virtualization is already active
     .OUTPUTS
     Returns hashtable with Enabled (bool) and Message (string).
     #>
     try {
-        $cpu = Get-CimInstance -ClassName Win32_Processor
-        if ($cpu.VirtualizationFirmwareEnabled -eq $false) {
+        # Method 1: Check if hypervisor is already present (most reliable when WSL2/Hyper-V active)
+        $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+        if ($computerSystem.HypervisorPresent -eq $true) {
+            return @{ Enabled = $true; Message = "Hypervisor already active" }
+        }
+
+        # Method 2: Check firmware setting (only reliable when hypervisor is NOT running)
+        $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction SilentlyContinue
+        if ($cpu.VirtualizationFirmwareEnabled -eq $true) {
+            return @{ Enabled = $true; Message = "Virtualization enabled in firmware" }
+        }
+
+        # Method 3: Check via Get-ComputerInfo (Windows 10+)
+        try {
+            $compInfo = Get-ComputerInfo -Property HyperV* -ErrorAction SilentlyContinue
+            if ($compInfo.HyperVisorPresent -eq $true) {
+                return @{ Enabled = $true; Message = "Hypervisor present (Get-ComputerInfo)" }
+            }
+            if ($compInfo.HyperVRequirementVirtualizationFirmwareEnabled -eq $true) {
+                return @{ Enabled = $true; Message = "Virtualization enabled (Get-ComputerInfo)" }
+            }
+        }
+        catch {
+            # Get-ComputerInfo may not be available on all systems
+        }
+
+        # If we reach here without confirming enabled, check if it's explicitly disabled
+        if ($cpu.VirtualizationFirmwareEnabled -eq $false -and $computerSystem.HypervisorPresent -eq $false) {
             return @{
                 Enabled = $false
                 Message = "Hardware virtualization is disabled in BIOS/UEFI. Enable VT-x/AMD-V."
             }
         }
 
-        return @{ Enabled = $true; Message = "Virtualization enabled" }
+        # Can't determine - assume enabled and let WSL fail with its own error if not
+        return @{ Enabled = $true; Message = "Virtualization status unclear (assuming enabled)" }
     }
     catch {
         # Can't verify - assume enabled and let WSL fail with its own error if not
