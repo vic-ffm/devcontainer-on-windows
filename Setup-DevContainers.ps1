@@ -520,9 +520,15 @@ function Get-SetupState {
 }
 
 function Clear-SetupState {
-    # Clean up scheduled task if it exists
-    $null = schtasks.exe /delete /tn $script:RESUME_TASK_NAME /f 2>&1
-    Write-LogDebug "Cleaned up resume task (if existed)"
+    # Clean up scheduled task if it exists (ignore errors if task doesn't exist)
+    try {
+        $null = schtasks.exe /delete /tn $script:RESUME_TASK_NAME /f 2>&1
+        Write-LogDebug "Cleaned up resume task (if existed)"
+    }
+    catch {
+        # Task didn't exist - that's fine
+        Write-LogDebug "No resume task to clean up"
+    }
 
     # Clean up registry state
     if (Test-Path $script:STATE_REG_PATH) {
