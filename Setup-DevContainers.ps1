@@ -896,7 +896,7 @@ function Install-WslDistro {
         # Check for and clean up broken existing installation
         $existingCheck = wsl --list --quiet 2>&1 | Out-String
         $existingCheck = $existingCheck -replace '\x00', ''
-        if ($existingCheck -match "(?m)^$wslName\s*$") {
+        if ($existingCheck -match "(?m)^$([regex]::Escape($wslName))\s*$") {
             # Distro exists - test if it's usable
             Write-LogDebug "Found existing $wslName, checking health..."
             $testResult = wsl -d $wslName -u root --cd /tmp -- echo "health_check" 2>&1
@@ -987,7 +987,7 @@ function Install-WslDistro {
         for ($retry = 0; $retry -lt $maxRetries; $retry++) {
             $listOutput = wsl --list --quiet 2>&1 | Out-String
             $listOutput = $listOutput -replace '\x00', ''
-            if ($listOutput -match "(?m)^$wslName\s*$") {
+            if ($listOutput -match "(?m)^$([regex]::Escape($wslName))\s*$") {
                 $distroRegistered = $true
                 Write-LogDebug "Distro verified in wsl --list after $($retry + 1) attempt(s)"
                 break
