@@ -266,7 +266,7 @@ function Get-Confirmation {
 }
 
 #-------------------------------------------------------------------------------
-# Script Locking (prevent concurrent execution)
+# Script Locking
 #-------------------------------------------------------------------------------
 function Enter-ScriptLock {
     <#
@@ -381,7 +381,7 @@ function Test-VirtualizationEnabled {
 }
 
 #-------------------------------------------------------------------------------
-# WSL Command Helpers (robust UTF-16 handling and timeout support)
+# WSL Command Helpers 
 #-------------------------------------------------------------------------------
 function Invoke-WslCommand {
     <#
@@ -614,7 +614,7 @@ function Request-Reboot {
 }
 
 #-------------------------------------------------------------------------------
-# WSL Configuration Functions
+# Configuration Functions
 #-------------------------------------------------------------------------------
 function Initialize-WslConfig {
     Write-LogInfo "Configuring WSL settings (.wslconfig)..."
