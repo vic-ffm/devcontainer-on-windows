@@ -10,6 +10,7 @@
 #   - Sets up Git with proper line ending handling
 #   - Installs Docker via install-docker.sh
 #   - Installs GitHub CLI and configures Git authentication
+#   - Configures SSH agent for devcontainer credential forwarding
 #   Non-interactive and idempotent.
 #
 # REQUIREMENTS:
@@ -28,6 +29,7 @@
 #   --skip-docker      Skip Docker installation
 #   --skip-github      Skip GitHub CLI installation and authentication
 #   --skip-shell       Skip shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)
+#   --skip-ssh-agent   Skip SSH agent configuration for devcontainers
 #   --help, -h         Show this help message
 #
 # ENVIRONMENT:
@@ -85,6 +87,8 @@ declare -ri EXIT_GITHUB_FAILED=7
 # shellcheck disable=SC2034  # EXIT_USER_CANCELLED defined for completeness
 declare -ri EXIT_USER_CANCELLED=8
 declare -ri EXIT_SHELL_FAILED=9
+# shellcheck disable=SC2034  # EXIT_SSH_AGENT_FAILED defined for completeness
+declare -ri EXIT_SSH_AGENT_FAILED=10
 
 # Required commands
 declare -ra REQUIRED_COMMANDS=(
@@ -117,6 +121,7 @@ declare VERBOSE=false
 declare SKIP_DOCKER=false
 declare SKIP_GITHUB=false
 declare SKIP_SHELL=false
+declare SKIP_SSH_AGENT=false
 
 # Cleanup state tracking
 declare -i CLEANUP_IN_PROGRESS=0
@@ -511,7 +516,7 @@ install_prerequisites() {
 create_user() {
   local -r username="$1"
 
-  log_step "1/9" "Creating user '${username}'"
+  log_step "1/10" "Creating user '${username}'"
 
   # Check if user already exists
   if id "${username}" &>/dev/null; then
@@ -542,7 +547,7 @@ create_user() {
 configure_passwordless_sudo() {
   local -r username="$1"
 
-  log_step "2/9" "Configuring passwordless sudo"
+  log_step "2/10" "Configuring passwordless sudo"
 
   local -r sudoers_file="/etc/sudoers.d/${username}"
   local -r sudoers_content="${username} ALL=(ALL) NOPASSWD:ALL"
@@ -575,7 +580,7 @@ configure_passwordless_sudo() {
 configure_wsl() {
   local -r username="$1"
 
-  log_step "3/9" "Configuring WSL environment"
+  log_step "3/10" "Configuring WSL environment"
 
   local -r wsl_conf="/etc/wsl.conf"
 
@@ -621,7 +626,7 @@ configure_git() {
   local -r username="$1"
   local -r user_home="/home/${username}"
 
-  log_step "4/9" "Configuring Git"
+  log_step "4/10" "Configuring Git"
 
   if [[ ${DRY_RUN} == true ]]; then
     log_info "[DRY-RUN] Would configure Git for ${username}"
@@ -657,7 +662,7 @@ configure_git() {
 install_docker() {
   local -r username="$1"
 
-  log_step "5/9" "Installing Docker"
+  log_step "5/10" "Installing Docker"
 
   if [[ ${SKIP_DOCKER} == true ]]; then
     log_info "Skipping Docker installation (--skip-docker)"
@@ -701,7 +706,7 @@ install_docker() {
 install_github_cli() {
   local -r username="$1"
 
-  log_step "6/9" "Installing GitHub CLI and configuring authentication"
+  log_step "6/10" "Installing GitHub CLI and configuring authentication"
 
   if [[ ${SKIP_GITHUB} == true ]]; then
     log_info "Skipping GitHub CLI installation (--skip-github)"
@@ -744,10 +749,107 @@ install_github_cli() {
   log_success "GitHub CLI installed and configured"
 }
 
+configure_ssh_agent() {
+  local -r username="$1"
+  local -r user_home="/home/${username}"
+  # shellcheck disable=SC2312  # Intentional: command substitution in readonly variable
+  local -r user_id="$(id -u "${username}")"
+  local -r systemd_user_dir="${user_home}/.config/systemd/user"
+  local -r service_file="${systemd_user_dir}/ssh-agent.service"
+
+  log_step "7/10" "Configuring SSH agent for devcontainers"
+
+  if [[ ${SKIP_SSH_AGENT} == true ]]; then
+    log_info "Skipping SSH agent configuration (--skip-ssh-agent)"
+    return 0
+  fi
+
+  # Skip if GitHub CLI was skipped (no SSH key to load)
+  if [[ ${SKIP_GITHUB} == true ]]; then
+    log_info "Skipping SSH agent (GitHub CLI was skipped)"
+    return 0
+  fi
+
+  if [[ ${DRY_RUN} == true ]]; then
+    log_info "[DRY-RUN] Would configure SSH agent systemd service"
+    return 0
+  fi
+
+  # Check if systemd is available
+  if ! pidof systemd &>/dev/null; then
+    log_warn "systemd not running - SSH agent will be configured but not started"
+    log_warn "It will start after: wsl --shutdown && wsl"
+  fi
+
+  # Create systemd user directory
+  log_info "Creating systemd user directory..."
+  sudo -u "${username}" mkdir -p "${systemd_user_dir}"
+
+  # Create ssh-agent.service
+  log_info "Installing SSH agent systemd service..."
+
+  cat >"${service_file}" <<'SERVICE_EOF'
+[Unit]
+Description=SSH Authentication Agent
+Documentation=man:ssh-agent(1)
+
+[Service]
+Type=simple
+Environment=SSH_AUTH_SOCK=%t/ssh-agent.socket
+ExecStart=/usr/bin/ssh-agent -D -a %t/ssh-agent.socket
+ExecStartPost=-/usr/bin/ssh-add %h/.ssh/id_ed25519_github
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+SERVICE_EOF
+
+  chown "${username}:${username}" "${service_file}"
+  chmod 644 "${service_file}"
+  register_created_file "${service_file}"
+
+  # Enable lingering for user (required for WSL2 to start user services at boot)
+  log_info "Enabling user session persistence..."
+  loginctl enable-linger "${username}"
+
+  # Reload systemd user daemon and enable service
+  log_info "Enabling SSH agent service..."
+
+  # Need to set XDG_RUNTIME_DIR for systemctl --user to work when running as root
+  local -r runtime_dir="/run/user/${user_id}"
+
+  sudo -u "${username}" XDG_RUNTIME_DIR="${runtime_dir}" \
+    systemctl --user daemon-reload 2>/dev/null || true
+
+  sudo -u "${username}" XDG_RUNTIME_DIR="${runtime_dir}" \
+    systemctl --user enable ssh-agent.service 2>/dev/null || true
+
+  # Start service if systemd is running
+  if pidof systemd &>/dev/null; then
+    log_info "Starting SSH agent service..."
+    sudo -u "${username}" XDG_RUNTIME_DIR="${runtime_dir}" \
+      systemctl --user start ssh-agent.service 2>/dev/null || true
+
+    # Wait briefly for socket to be created
+    sleep 1
+
+    # Verify socket exists
+    local -r socket_path="${runtime_dir}/ssh-agent.socket"
+    if [[ -S "${socket_path}" ]]; then
+      log_success "SSH agent socket created: ${socket_path}"
+    else
+      log_warn "SSH agent socket not found (may appear after WSL restart)"
+    fi
+  fi
+
+  log_success "SSH agent configured for devcontainers"
+}
+
 install_shell_customization() {
   local -r username="$1"
 
-  log_step "7/9" "Installing shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)"
+  log_step "8/10" "Installing shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)"
 
   if [[ ${SKIP_SHELL} == true ]]; then
     log_info "Skipping shell customization (--skip-shell)"
@@ -832,6 +934,18 @@ EOF
     log_debug "Added VS Code to integration file: ${vscode_bin_path}"
   fi
 
+  # Add SSH_AUTH_SOCK for devcontainer access
+  cat >>"${integration_file}" <<'SSH_AGENT_EOF'
+# SSH Agent for DevContainers
+# Socket path is predictable for mounting into containers
+_ssh_agent_socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ssh-agent.socket"
+if [[ -S "${_ssh_agent_socket}" ]]; then
+    export SSH_AUTH_SOCK="${_ssh_agent_socket}"
+fi
+unset _ssh_agent_socket
+
+SSH_AGENT_EOF
+
   # Add selective Windows executable functions and aliases
   cat >>"${integration_file}" <<'ALIASES_EOF'
 # Selective Windows commands (NOT entire System32 in PATH)
@@ -897,7 +1011,7 @@ configure_windows_integration() {
   local -r zshrc="${user_home}/.zshrc"
   local -r integration_file="${user_home}/.wsl-windows-integration"
 
-  log_step "8/9" "Configuring Windows integration"
+  log_step "9/10" "Configuring Windows integration"
 
   if [[ ${DRY_RUN} == true ]]; then
     log_info "[DRY-RUN] Would configure Windows integration"
@@ -963,7 +1077,7 @@ configure_windows_integration() {
 verify_setup() {
   local -r username="$1"
 
-  log_step "9/9" "Verifying setup"
+  log_step "10/10" "Verifying setup"
 
   if [[ ${DRY_RUN} == true ]]; then
     log_info "[DRY-RUN] Verification skipped"
@@ -1054,6 +1168,37 @@ verify_setup() {
       log_success "GitHub SSH key exists"
     else
       log_warn "GitHub SSH key not found"
+    fi
+  fi
+
+  # Check SSH agent
+  if [[ ${SKIP_SSH_AGENT} != true && ${SKIP_GITHUB} != true ]]; then
+    # shellcheck disable=SC2312  # Intentional: command substitution in variable
+    local -r user_runtime_dir="/run/user/$(id -u "${username}")"
+    local -r socket_path="${user_runtime_dir}/ssh-agent.socket"
+
+    # Check service enabled
+    if sudo -u "${username}" XDG_RUNTIME_DIR="${user_runtime_dir}" \
+        systemctl --user is-enabled ssh-agent.service &>/dev/null; then
+      log_success "SSH agent service enabled"
+    else
+      log_warn "SSH agent service not enabled"
+    fi
+
+    # Check socket (if systemd running)
+    if pidof systemd &>/dev/null; then
+      if [[ -S "${socket_path}" ]]; then
+        log_success "SSH agent socket: ${socket_path}"
+
+        # Check key loaded
+        if sudo -u "${username}" SSH_AUTH_SOCK="${socket_path}" ssh-add -l &>/dev/null; then
+          log_success "SSH key loaded in agent"
+        else
+          log_info "SSH key will load on first use (AddKeysToAgent=yes)"
+        fi
+      else
+        log_warn "SSH agent socket not found (restart WSL)"
+      fi
     fi
   fi
 
@@ -1149,6 +1294,7 @@ ${COLORS[bold]}OPTIONS:${COLORS[reset]}
     --skip-docker      Skip Docker installation
     --skip-github      Skip GitHub CLI installation and authentication
     --skip-shell       Skip shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)
+    --skip-ssh-agent   Skip SSH agent configuration for devcontainers
     --help, -h         Show this help message
 
 ${COLORS[bold]}WHAT THIS SCRIPT DOES:${COLORS[reset]}
@@ -1158,7 +1304,8 @@ ${COLORS[bold]}WHAT THIS SCRIPT DOES:${COLORS[reset]}
     4. Creates ~/projects directory for code
     5. Installs Docker via install-docker.sh
     6. Installs GitHub CLI and configures Git authentication
-    7. Installs shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)
+    7. Configures SSH agent for devcontainer credential forwarding
+    8. Installs shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)
 
 ${COLORS[bold]}EXAMPLES:${COLORS[reset]}
     # Standard setup
@@ -1223,6 +1370,10 @@ parse_arguments() {
         SKIP_SHELL=true
         shift
         ;;
+      --skip-ssh-agent)
+        SKIP_SSH_AGENT=true
+        shift
+        ;;
       --help | -h)
         show_help
         exit 0
@@ -1261,7 +1412,7 @@ main() {
   setup_signal_handlers
 
   # Freeze configuration
-  readonly TARGET_USER DRY_RUN VERBOSE SKIP_DOCKER SKIP_GITHUB SKIP_SHELL
+  readonly TARGET_USER DRY_RUN VERBOSE SKIP_DOCKER SKIP_GITHUB SKIP_SHELL SKIP_SSH_AGENT
 
   acquire_lock
 
@@ -1280,6 +1431,7 @@ main() {
   configure_git "${TARGET_USER}"
   install_docker "${TARGET_USER}"
   install_github_cli "${TARGET_USER}"
+  configure_ssh_agent "${TARGET_USER}"
   install_shell_customization "${TARGET_USER}"
   configure_windows_integration "${TARGET_USER}"
 
