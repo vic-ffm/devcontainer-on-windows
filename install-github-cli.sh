@@ -943,7 +943,17 @@ authenticate_github() {
   # Run gh auth login as the target user
   # This is interactive and requires user browser action
   # Note: admin:public_key scope is required for gh ssh-key add
-  if ! sudo -u "${TARGET_USER}" gh auth login \
+
+  # Set browser for WSL2 - use Windows explorer.exe to open URLs
+  # Must use full path because appendWindowsPath=false in /etc/wsl.conf
+  local -r windows_browser="/mnt/c/Windows/explorer.exe"
+
+  if [[ ! -x "${windows_browser}" ]]; then
+    log_warn "Windows explorer.exe not found at ${windows_browser}"
+    log_warn "Browser may not open automatically - copy the URL manually"
+  fi
+
+  if ! sudo -u "${TARGET_USER}" GH_BROWSER="${windows_browser}" gh auth login \
     --hostname github.com \
     --git-protocol https \
     --web \
