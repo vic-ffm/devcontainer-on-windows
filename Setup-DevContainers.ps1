@@ -893,7 +893,7 @@ function Install-WslDistro {
         if ($existingCheck -match "(?m)^$wslName\s*$") {
             # Distro exists - test if it's usable
             Write-LogDebug "Found existing $wslName, checking health..."
-            $testResult = wsl -d $wslName -u root -- echo "health_check" 2>&1
+            $testResult = wsl -d $wslName -u root --cd /tmp -- echo "health_check" 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-LogWarn "Found broken $wslName installation, removing before reinstall..."
                 $null = wsl --unregister $wslName 2>$null
@@ -1076,7 +1076,7 @@ function Initialize-WslDistro {
         $wslReady = $false
 
         for ($i = 0; $i -lt $maxProbeRetries; $i++) {
-            $initResult = wsl -d $WslDistroName -u root -- echo "WSL_READY" 2>&1
+            $initResult = wsl -d $WslDistroName -u root --cd /tmp -- echo "WSL_READY" 2>&1
             $initStr = ($initResult | Out-String) -replace '\x00', '' -replace '\r', ''
 
             if ($LASTEXITCODE -eq 0 -and $initStr -match "WSL_READY") {
@@ -1096,7 +1096,7 @@ function Initialize-WslDistro {
             throw "WSL distribution $WslDistroName failed to respond after $maxProbeRetries attempts"
         }
 
-        $null = wsl -d $WslDistroName -u root -- mkdir -p /tmp 2>$null
+        $null = wsl -d $WslDistroName -u root --cd / -- mkdir -p /tmp 2>$null
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to create /tmp directory in WSL"
         }
@@ -1190,46 +1190,46 @@ function Initialize-WslDistro {
 
             # Copy files to /tmp in WSL and fix line endings
             Write-LogDebug "Copying and converting line endings..."
-            wsl -d $WslDistroName -u root -- sh -c "cat '$wslTempDir/setup-wsl-devcontainers.sh' | tr -d '\r' > /tmp/setup-wsl-devcontainers.sh"
+            wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/setup-wsl-devcontainers.sh' | tr -d '\r' > /tmp/setup-wsl-devcontainers.sh"
             if ($LASTEXITCODE -ne 0) {
                 throw "Failed to copy setup-wsl-devcontainers.sh to WSL"
             }
 
-            wsl -d $WslDistroName -u root -- sh -c "cat '$wslTempDir/install-docker.sh' | tr -d '\r' > /tmp/install-docker.sh"
+            wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/install-docker.sh' | tr -d '\r' > /tmp/install-docker.sh"
             if ($LASTEXITCODE -ne 0) {
                 throw "Failed to copy install-docker.sh to WSL"
             }
 
             if ($tempGithubPath) {
-                wsl -d $WslDistroName -u root -- sh -c "cat '$wslTempDir/install-github-cli.sh' | tr -d '\r' > /tmp/install-github-cli.sh"
+                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/install-github-cli.sh' | tr -d '\r' > /tmp/install-github-cli.sh"
                 if ($LASTEXITCODE -ne 0) {
                     throw "Failed to copy install-github-cli.sh to WSL"
                 }
             }
 
             if ($tempShellPath) {
-                wsl -d $WslDistroName -u root -- sh -c "cat '$wslTempDir/install-shell-customization.sh' | tr -d '\r' > /tmp/install-shell-customization.sh"
+                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/install-shell-customization.sh' | tr -d '\r' > /tmp/install-shell-customization.sh"
                 if ($LASTEXITCODE -ne 0) {
                     Write-LogWarn "Failed to copy install-shell-customization.sh to WSL"
                 }
             }
 
             if ($tempP10kPath) {
-                wsl -d $WslDistroName -u root -- sh -c "cat '$wslTempDir/p10k.zsh' | tr -d '\r' > /tmp/p10k.zsh"
+                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/p10k.zsh' | tr -d '\r' > /tmp/p10k.zsh"
                 if ($LASTEXITCODE -ne 0) {
                     Write-LogWarn "Failed to copy p10k.zsh to WSL"
                 }
             }
 
             if ($tempZshPluginsPath) {
-                wsl -d $WslDistroName -u root -- sh -c "cat '$wslTempDir/zsh_plugins.txt' | tr -d '\r' > /tmp/zsh_plugins.txt"
+                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/zsh_plugins.txt' | tr -d '\r' > /tmp/zsh_plugins.txt"
                 if ($LASTEXITCODE -ne 0) {
                     Write-LogWarn "Failed to copy zsh_plugins.txt to WSL"
                 }
             }
 
             # Verify files exist
-            $verifyResult = wsl -d $WslDistroName -u root -- ls -la /tmp/*.sh 2>&1
+            $verifyResult = wsl -d $WslDistroName -u root --cd /tmp -- ls -la /tmp/*.sh 2>&1
             $verifyStr = ($verifyResult | Out-String) -replace '\x00', '' -replace '\r', ''
             Write-LogDebug "Scripts in /tmp: $verifyStr"
 
@@ -1238,7 +1238,7 @@ function Initialize-WslDistro {
             }
 
             # Verify the critical function name exists in the docker script (catches truncation issues)
-            $validateCheck = wsl -d $WslDistroName -u root -- grep -c 'validate_user' /tmp/install-docker.sh 2>$null
+            $validateCheck = wsl -d $WslDistroName -u root --cd /tmp -- grep -c 'validate_user' /tmp/install-docker.sh 2>$null
             $validateCount = ($validateCheck | Out-String).Trim() -replace '\x00', ''
             Write-LogDebug "validate_user occurrences: $validateCount"
             if ([int]$validateCount -lt 3) {
@@ -1256,11 +1256,11 @@ function Initialize-WslDistro {
             }
 
             foreach ($scriptPath in $chmodScripts) {
-                $null = wsl -d $WslDistroName -u root -- test -f $scriptPath
+                $null = wsl -d $WslDistroName -u root --cd /tmp -- test -f $scriptPath
                 if ($LASTEXITCODE -ne 0) {
                     throw "Script file not found in WSL: $scriptPath"
                 }
-                $null = wsl -d $WslDistroName -u root -- chmod +x $scriptPath
+                $null = wsl -d $WslDistroName -u root --cd /tmp -- chmod +x $scriptPath
                 if ($LASTEXITCODE -ne 0) {
                     throw "Failed to set execute permission on: $scriptPath"
                 }
@@ -1276,8 +1276,8 @@ function Initialize-WslDistro {
         Write-LogInfo "Running Linux setup script..."
         Write-LogInfo "This may take several minutes..."
 
-        # Build argument list
-        $argList = @("-d", $WslDistroName, "-u", "root", "--", "/tmp/setup-wsl-devcontainers.sh", "--user", $unixUser)
+        # Build argument list (--cd /tmp avoids CWD translation issues with UNC paths)
+        $argList = @("-d", $WslDistroName, "-u", "root", "--cd", "/tmp", "--", "/tmp/setup-wsl-devcontainers.sh", "--user", $unixUser)
         if ($VerbosePreference -eq 'Continue') {
             $argList += "--verbose"
         }
@@ -1998,7 +1998,7 @@ function Main {
     # Verify VS Code integration in WSL
     if (-not $skipConfiguration) {
         Write-LogInfo "Verifying VS Code integration in WSL..."
-        $codeTest = wsl -d $wslDistroName -- bash -c 'source ~/.bashrc && which code 2>/dev/null || echo "NOT_FOUND"' 2>&1 | Out-String
+        $codeTest = wsl -d $wslDistroName --cd ~ -- bash -c 'source ~/.bashrc && which code 2>/dev/null || echo "NOT_FOUND"' 2>&1 | Out-String
         $codeTest = $codeTest -replace '\x00', '' -replace '\r?\n', ''
         if ($codeTest -match "NOT_FOUND" -or [string]::IsNullOrWhiteSpace($codeTest)) {
             Write-LogWarn "VS Code 'code' command not found in WSL PATH"
