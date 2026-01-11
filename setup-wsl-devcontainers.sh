@@ -30,6 +30,7 @@
 #   --skip-github      Skip GitHub CLI installation and authentication
 #   --skip-shell       Skip shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)
 #   --skip-ssh-agent   Skip SSH agent configuration for devcontainers
+#   --skip-qemu-binfmt Skip QEMU binfmt setup for multi-arch Docker
 #   --help, -h         Show this help message
 #
 # ENVIRONMENT:
@@ -89,6 +90,8 @@ declare -ri EXIT_USER_CANCELLED=8
 declare -ri EXIT_SHELL_FAILED=9
 # shellcheck disable=SC2034  # EXIT_SSH_AGENT_FAILED defined for completeness
 declare -ri EXIT_SSH_AGENT_FAILED=10
+# shellcheck disable=SC2034  # EXIT_QEMU_FAILED defined for completeness
+declare -ri EXIT_QEMU_FAILED=11
 
 # Required commands
 declare -ra REQUIRED_COMMANDS=(
@@ -122,6 +125,7 @@ declare SKIP_DOCKER=false
 declare SKIP_GITHUB=false
 declare SKIP_SHELL=false
 declare SKIP_SSH_AGENT=false
+declare SKIP_QEMU_BINFMT=false
 
 # Cleanup state tracking
 declare -i CLEANUP_IN_PROGRESS=0
@@ -516,7 +520,7 @@ install_prerequisites() {
 create_user() {
   local -r username="$1"
 
-  log_step "1/10" "Creating user '${username}'"
+  log_step "1/11" "Creating user '${username}'"
 
   # Check if user already exists
   if id "${username}" &>/dev/null; then
@@ -547,7 +551,7 @@ create_user() {
 configure_passwordless_sudo() {
   local -r username="$1"
 
-  log_step "2/10" "Configuring passwordless sudo"
+  log_step "2/11" "Configuring passwordless sudo"
 
   local -r sudoers_file="/etc/sudoers.d/${username}"
   local -r sudoers_content="${username} ALL=(ALL) NOPASSWD:ALL"
@@ -580,7 +584,7 @@ configure_passwordless_sudo() {
 configure_wsl() {
   local -r username="$1"
 
-  log_step "3/10" "Configuring WSL environment"
+  log_step "3/11" "Configuring WSL environment"
 
   local -r wsl_conf="/etc/wsl.conf"
 
@@ -626,7 +630,7 @@ configure_git() {
   local -r username="$1"
   local -r user_home="/home/${username}"
 
-  log_step "4/10" "Configuring Git"
+  log_step "4/11" "Configuring Git"
 
   if [[ ${DRY_RUN} == true ]]; then
     log_info "[DRY-RUN] Would configure Git for ${username}"
@@ -662,7 +666,7 @@ configure_git() {
 install_docker() {
   local -r username="$1"
 
-  log_step "5/10" "Installing Docker"
+  log_step "5/11" "Installing Docker"
 
   if [[ ${SKIP_DOCKER} == true ]]; then
     log_info "Skipping Docker installation (--skip-docker)"
@@ -703,10 +707,66 @@ install_docker() {
   log_success "Docker installed successfully"
 }
 
+#-------------------------------------------------------------------------------
+# QEMU/binfmt Installation
+#-------------------------------------------------------------------------------
+install_qemu_binfmt() {
+  local -r username="$1"
+
+  log_step "6/11" "Installing QEMU user-mode emulation for multi-arch Docker"
+
+  if [[ ${SKIP_QEMU_BINFMT} == true ]]; then
+    log_info "Skipping QEMU binfmt installation (--skip-qemu-binfmt)"
+    return 0
+  fi
+
+  # Requires Docker to be installed
+  if [[ ${SKIP_DOCKER} == true ]]; then
+    log_warn "QEMU binfmt requires Docker - skipping (Docker was skipped)"
+    return 0
+  fi
+
+  # Check for local installer
+  # shellcheck disable=SC2312  # Intentional: failure here will cause file checks to fail gracefully
+  local -r script_dir="$(dirname "$(readlink -f "$0")")"
+  local installer=""
+
+  if [[ -f "${script_dir}/install-qemu-binfmt.sh" ]]; then
+    installer="${script_dir}/install-qemu-binfmt.sh"
+    log_debug "Using bundled QEMU binfmt installer: ${installer}"
+  elif [[ -f "/tmp/install-qemu-binfmt.sh" ]]; then
+    installer="/tmp/install-qemu-binfmt.sh"
+    log_debug "Using /tmp QEMU binfmt installer"
+  else
+    log_warn "install-qemu-binfmt.sh not found - skipping QEMU binfmt setup"
+    log_warn "To install later, run: sudo ./install-qemu-binfmt.sh --user ${username}"
+    return 0
+  fi
+
+  if [[ ${DRY_RUN} == true ]]; then
+    log_info "[DRY-RUN] Would execute: ${installer} --user ${username}"
+    return 0
+  fi
+
+  # Execute installer
+  local -a qemu_args=(--user "${username}")
+  [[ ${VERBOSE} == true ]] && qemu_args+=(--verbose)
+
+  # Note: QEMU binfmt installation is non-fatal - the systemd service will
+  # handle registration on boot if Docker isn't running yet
+  if ! bash "${installer}" "${qemu_args[@]}"; then
+    log_warn "QEMU binfmt installation had issues (non-fatal)"
+    log_warn "Run manually after WSL restart: sudo ./install-qemu-binfmt.sh --user ${username}"
+    return 0
+  fi
+
+  log_success "QEMU user-mode emulation configured"
+}
+
 install_github_cli() {
   local -r username="$1"
 
-  log_step "6/10" "Installing GitHub CLI and configuring authentication"
+  log_step "7/11" "Installing GitHub CLI and configuring authentication"
 
   if [[ ${SKIP_GITHUB} == true ]]; then
     log_info "Skipping GitHub CLI installation (--skip-github)"
@@ -757,7 +817,7 @@ configure_ssh_agent() {
   local -r systemd_user_dir="${user_home}/.config/systemd/user"
   local -r service_file="${systemd_user_dir}/ssh-agent.service"
 
-  log_step "7/10" "Configuring SSH agent for devcontainers"
+  log_step "8/11" "Configuring SSH agent for devcontainers"
 
   if [[ ${SKIP_SSH_AGENT} == true ]]; then
     log_info "Skipping SSH agent configuration (--skip-ssh-agent)"
@@ -855,7 +915,7 @@ SERVICE_EOF
 install_shell_customization() {
   local -r username="$1"
 
-  log_step "8/10" "Installing shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)"
+  log_step "9/11" "Installing shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)"
 
   if [[ ${SKIP_SHELL} == true ]]; then
     log_info "Skipping shell customization (--skip-shell)"
@@ -1022,7 +1082,7 @@ configure_windows_integration() {
   local -r zshrc="${user_home}/.zshrc"
   local -r integration_file="${user_home}/.wsl-windows-integration"
 
-  log_step "9/10" "Configuring Windows integration"
+  log_step "10/11" "Configuring Windows integration"
 
   if [[ ${DRY_RUN} == true ]]; then
     log_info "[DRY-RUN] Would configure Windows integration"
@@ -1088,7 +1148,7 @@ configure_windows_integration() {
 verify_setup() {
   local -r username="$1"
 
-  log_step "10/10" "Verifying setup"
+  log_step "11/11" "Verifying setup"
 
   if [[ ${DRY_RUN} == true ]]; then
     log_info "[DRY-RUN] Verification skipped"
@@ -1158,6 +1218,25 @@ verify_setup() {
     fi
   fi
 
+  # Check QEMU binfmt
+  if [[ ${SKIP_QEMU_BINFMT} != true ]] && [[ ${SKIP_DOCKER} != true ]]; then
+    # Check systemd service exists
+    if [[ -f /etc/systemd/system/docker-binfmt.service ]]; then
+      log_success "QEMU binfmt service installed"
+    else
+      log_warn "QEMU binfmt service not installed"
+    fi
+
+    # Check binfmt_misc registrations (if Docker is running)
+    if docker info &>/dev/null; then
+      if [[ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]]; then
+        log_success "QEMU binfmt interpreters registered"
+      else
+        log_warn "QEMU binfmt interpreters not registered (will activate after WSL restart)"
+      fi
+    fi
+  fi
+
   # Check GitHub CLI
   if [[ ${SKIP_GITHUB} != true ]]; then
     # shellcheck disable=SC2310  # Intentional: capture result in variable
@@ -1190,7 +1269,7 @@ verify_setup() {
 
     # Check service enabled
     if sudo -u "${username}" XDG_RUNTIME_DIR="${user_runtime_dir}" \
-        systemctl --user is-enabled ssh-agent.service &>/dev/null; then
+      systemctl --user is-enabled ssh-agent.service &>/dev/null; then
       log_success "SSH agent service enabled"
     else
       log_warn "SSH agent service not enabled"
@@ -1306,6 +1385,7 @@ ${COLORS[bold]}OPTIONS:${COLORS[reset]}
     --skip-github      Skip GitHub CLI installation and authentication
     --skip-shell       Skip shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)
     --skip-ssh-agent   Skip SSH agent configuration for devcontainers
+    --skip-qemu-binfmt Skip QEMU binfmt setup for multi-arch Docker
     --help, -h         Show this help message
 
 ${COLORS[bold]}WHAT THIS SCRIPT DOES:${COLORS[reset]}
@@ -1314,9 +1394,10 @@ ${COLORS[bold]}WHAT THIS SCRIPT DOES:${COLORS[reset]}
     3. Sets up Git with proper line ending handling
     4. Creates ~/projects directory for code
     5. Installs Docker via install-docker.sh
-    6. Installs GitHub CLI and configures Git authentication
-    7. Configures SSH agent for devcontainer credential forwarding
-    8. Installs shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)
+    6. Installs QEMU binfmt for multi-arch Docker builds (ARM64, RISC-V, etc.)
+    7. Installs GitHub CLI and configures Git authentication
+    8. Configures SSH agent for devcontainer credential forwarding
+    9. Installs shell customization (Zsh/Oh-My-Zsh/Powerlevel10k/mise)
 
 ${COLORS[bold]}EXAMPLES:${COLORS[reset]}
     # Standard setup
@@ -1385,6 +1466,10 @@ parse_arguments() {
         SKIP_SSH_AGENT=true
         shift
         ;;
+      --skip-qemu-binfmt)
+        SKIP_QEMU_BINFMT=true
+        shift
+        ;;
       --help | -h)
         show_help
         exit 0
@@ -1441,6 +1526,7 @@ main() {
   configure_wsl "${TARGET_USER}"
   configure_git "${TARGET_USER}"
   install_docker "${TARGET_USER}"
+  install_qemu_binfmt "${TARGET_USER}"
   install_github_cli "${TARGET_USER}"
   configure_ssh_agent "${TARGET_USER}"
   install_shell_customization "${TARGET_USER}"
