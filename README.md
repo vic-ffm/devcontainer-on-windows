@@ -5,6 +5,8 @@
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 ![Bash](https://img.shields.io/badge/Bash-5.2%2B-4EAA25)
 
+**Alpha software.** Needs more testing. Review the scripts before running them on your system.
+
 Sets up VS Code DevContainers on Windows 11 using WSL2 and Docker Engine. The scripts handle WSL2, your Linux distro, Docker, and GitHub CLI.
 
 ## Table of Contents
