@@ -8,7 +8,7 @@
 #   Non-interactive mode available for automation.
 #
 # REQUIREMENTS:
-#   Windows 11 22H2+ 
+#   Windows 11 22H2+
 #   PowerShell 5.1+ or PowerShell 7+
 #   Administrator privileges
 #
@@ -62,13 +62,16 @@ param(
     [switch]$Help
 )
 
+# Satisfy PSScriptAnalyzer - parameters are used in nested function scopes
+$null = $Distro, $Resume, $DryRun, $NonInteractive, $SkipApps, $SkipFonts, $Force, $Help
+
 #-------------------------------------------------------------------------------
 # Strict Mode
 #-------------------------------------------------------------------------------
 Set-StrictMode -Version 3.0  # Explicit version for deterministic behavior
 $ErrorActionPreference = 'Stop'
 $script:OriginalProgressPreference = $ProgressPreference
-$ProgressPreference = 'SilentlyContinue' 
+$ProgressPreference = 'SilentlyContinue'
 
 #-------------------------------------------------------------------------------
 # Constants
@@ -84,7 +87,7 @@ $script:RESUME_TASK_NAME = "DevContainersSetup_Resume"
 $script:SETUP_MUTEX_NAME = "Global\DevContainersSetup_Mutex"
 $script:SetupMutex = $null
 
-# Exit codes 
+# Exit codes
 $script:EXIT_SUCCESS = 0
 $script:EXIT_GENERAL_ERROR = 1
 $script:EXIT_NOT_ADMIN = 2
@@ -95,19 +98,19 @@ $script:EXIT_WINGET_FAILED = 6
 $script:EXIT_REBOOT_REQUIRED = 7
 $script:EXIT_USER_CANCELLED = 8
 
-# Supported distros 
+# Supported distros
 $script:SUPPORTED_DISTROS = @{
     'Debian' = @{
-        WslName       = 'Debian'
-        DisplayName   = 'Debian 13 Trixie'
-        IsDefault     = $true
-        SupportUntil  = '2030-06-30'
+        WslName      = 'Debian'
+        DisplayName  = 'Debian 13 Trixie'
+        IsDefault    = $true
+        SupportUntil = '2030-06-30'
     }
     'Ubuntu' = @{
-        WslName       = 'Ubuntu-24.04'
-        DisplayName   = 'Ubuntu 24.04 LTS'
-        IsDefault     = $false
-        SupportUntil  = '2029-04'
+        WslName      = 'Ubuntu-24.04'
+        DisplayName  = 'Ubuntu 24.04 LTS'
+        IsDefault    = $false
+        SupportUntil = '2029-04'
     }
 }
 
@@ -137,7 +140,8 @@ function Initialize-Logging {
     "" | Out-File -FilePath $script:LOG_FILE -Encoding UTF8
 }
 
-function Write-Log {
+function Write-SetupLog {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive CLI requires colored console output')]
     param(
         [Parameter(Mandatory)]
         [string]$Level,
@@ -159,32 +163,33 @@ function Write-Log {
 
 function Write-LogInfo {
     param([string]$Message)
-    Write-Log -Level "INFO " -Message $Message -Color "Cyan"
+    Write-SetupLog -Level "INFO " -Message $Message -Color "Cyan"
 }
 
 function Write-LogSuccess {
     param([string]$Message)
-    Write-Log -Level "OK   " -Message $Message -Color "Green"
+    Write-SetupLog -Level "OK   " -Message $Message -Color "Green"
 }
 
 function Write-LogWarn {
     param([string]$Message)
-    Write-Log -Level "WARN " -Message $Message -Color "Yellow"
+    Write-SetupLog -Level "WARN " -Message $Message -Color "Yellow"
 }
 
 function Write-LogError {
     param([string]$Message)
-    Write-Log -Level "ERROR" -Message $Message -Color "Red"
+    Write-SetupLog -Level "ERROR" -Message $Message -Color "Red"
 }
 
 function Write-LogDebug {
     param([string]$Message)
     if ($VerbosePreference -eq 'Continue' -or $PSBoundParameters['Verbose']) {
-        Write-Log -Level "DEBUG" -Message $Message -Color "DarkGray"
+        Write-SetupLog -Level "DEBUG" -Message $Message -Color "DarkGray"
     }
 }
 
 function Write-LogStep {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive CLI requires colored console output')]
     param(
         [Parameter(Mandatory)]
         [string]$Step,
@@ -315,7 +320,8 @@ function Exit-ScriptLock {
             Write-LogDebug "Released script lock"
         }
         catch {
-            # Ignore errors during cleanup
+            # Intentionally suppressed: cleanup errors during mutex release are non-critical
+            $null = $_
         }
         $script:SetupMutex = $null
     }
@@ -360,7 +366,8 @@ function Test-VirtualizationEnabled {
             }
         }
         catch {
-            # Get-ComputerInfo may not be available on all systems
+            # Intentionally suppressed: Get-ComputerInfo may not be available on all systems
+            $null = $_
         }
 
         # If we reach here without confirming enabled, check if it's explicitly disabled
@@ -381,7 +388,7 @@ function Test-VirtualizationEnabled {
 }
 
 #-------------------------------------------------------------------------------
-# WSL Command Helpers 
+# WSL Command Helpers
 #-------------------------------------------------------------------------------
 function Invoke-WslCommand {
     <#
@@ -540,6 +547,7 @@ function Clear-SetupState {
 }
 
 function Request-Reboot {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive CLI requires colored console output')]
     param(
         [int]$NextPhase,
         [string]$SelectedDistro
@@ -625,7 +633,7 @@ function Initialize-WslConfig {
     # Calculate 80% of system RAM for WSL2 memory limit
     $totalRamBytes = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
     $wslMemoryGB = [Math]::Floor(($totalRamBytes * 0.8) / 1GB)
-    # Ensure minimum of 4GB 
+    # Ensure minimum of 4GB
     $wslMemoryGB = [Math]::Max($wslMemoryGB, 4)
     $memoryConfig = "${wslMemoryGB}GB"
     Write-LogDebug "System RAM: $([Math]::Round($totalRamBytes / 1GB, 1))GB, WSL2 limit: $memoryConfig (80%)"
@@ -696,10 +704,10 @@ function Initialize-WslConfig {
     }
 
     # Disable sparse VHD on existing distros to ensure consistency
-    Disable-SparseOnExistingDistros
+    Disable-SparseOnExistingDistro
 }
 
-function Disable-SparseOnExistingDistros {
+function Disable-SparseOnExistingDistro {
     Write-LogInfo "Checking sparse VHD status on existing distributions..."
 
     # Get list of existing distros
@@ -731,7 +739,7 @@ function Disable-SparseOnExistingDistros {
 
         Write-LogInfo "Disabling sparse VHD for: $distro"
 
-        # Disable sparse 
+        # Disable sparse
         $result = wsl --manage $distro --set-sparse false 2>&1
         $resultStr = ($result | Out-String) -replace '\x00', '' -replace '\r', ''
 
@@ -748,7 +756,7 @@ function Disable-SparseOnExistingDistros {
         Write-LogSuccess "VHD configuration complete"
     }
 
-    # WSL restart 
+    # WSL restart
     Write-LogInfo "Restarting WSL to apply all configuration changes..."
     wsl --shutdown 2>$null
     Start-Sleep -Seconds 3
@@ -786,7 +794,7 @@ function Test-WSL2Enabled {
     }
 }
 
-function Enable-WSL2Features {
+function Enable-WSL2Feature {
     Write-LogStep "1/7" "Enabling WSL2 features"
 
     $status = Test-WSL2Enabled
@@ -833,7 +841,10 @@ function Enable-WSL2Features {
     return $false
 }
 
-function Get-ExistingDistros {
+function Get-ExistingDistro {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive CLI requires colored console output')]
+    param()
+
     Write-LogStep "2/7" "Checking existing WSL distributions"
 
     try {
@@ -899,19 +910,20 @@ function Install-WslDistro {
         if ($existingCheck -match "(?m)^$([regex]::Escape($wslName))\s*$") {
             # Distro exists - test if it's usable
             Write-LogDebug "Found existing $wslName, checking health..."
-            $testResult = wsl -d $wslName -u root --cd /tmp -- echo "health_check" 2>&1
+            $null = wsl -d $wslName -u root --cd /tmp -- echo "health_check" 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-LogWarn "Found broken $wslName installation, removing before reinstall..."
                 $null = wsl --unregister $wslName 2>$null
                 Start-Sleep -Seconds 3
-            } else {
+            }
+            else {
                 # Distro exists and is healthy - return it
                 Write-LogInfo "Distro $wslName already exists and is healthy"
                 return $wslName
             }
         }
 
-        # Install without launching 
+        # Install without launching
         Write-LogInfo "Attempting installation via wsl --install..."
         $output = wsl --install -d $wslName --no-launch 2>&1
         $exitCode = $LASTEXITCODE
@@ -924,14 +936,14 @@ function Install-WslDistro {
             Write-LogInfo "Output: $($outputStr.Trim().Substring(0, [Math]::Min(200, $outputStr.Trim().Length)))..."
         }
 
-        # Check errors 
+        # Check errors
         $isSparseError = $outputStr -match "Sparse" -or $outputStr -match "VHD" -or $outputStr -match "corruption"
         $isFailure = $exitCode -ne 0
 
         if ($isSparseError -or $isFailure) {
             Write-LogWarn "Standard installation failed (sparse=$isSparseError, exitCode=$exitCode), trying alternative method..."
 
-            # Shut down WSL 
+            # Shut down WSL
             wsl --shutdown 2>$null
             Start-Sleep -Seconds 3
 
@@ -1190,8 +1202,8 @@ function Initialize-WslDistro {
                 [System.IO.File]::WriteAllBytes($tempZshPluginsPath, $zshPluginsBytes)
             }
 
-            # Convert Windows path to WSL path 
-            $wslTempDir = "/mnt/" + $tempDir.Substring(0,1).ToLower() + $tempDir.Substring(2).Replace('\', '/')
+            # Convert Windows path to WSL path
+            $wslTempDir = "/mnt/" + $tempDir.Substring(0, 1).ToLower() + $tempDir.Substring(2).Replace('\', '/')
             Write-LogDebug "WSL temp path: $wslTempDir"
 
             # Copy files to /tmp in WSL and fix line endings
@@ -1477,11 +1489,11 @@ function Install-MesloLGSNFFont {
     }
 
     # Configure terminals to use the font
-    Set-WindowsTerminalFont
-    Set-VSCodeTerminalFont
+    Initialize-WindowsTerminalFont
+    Initialize-VSCodeTerminalFont
 }
 
-function Set-WindowsTerminalFont {
+function Initialize-WindowsTerminalFont {
     Write-LogInfo "Configuring Windows Terminal font..."
 
     # Windows Terminal has multiple possible locations depending on installation method
@@ -1553,7 +1565,7 @@ function Set-WindowsTerminalFont {
     }
 }
 
-function Set-VSCodeTerminalFont {
+function Initialize-VSCodeTerminalFont {
     Write-LogInfo "Configuring VS Code terminal font..."
 
     $vscodeSettingsDir = Join-Path $env:APPDATA "Code\User"
@@ -1678,7 +1690,10 @@ function Install-VSCode {
             return $codePath
         }
     }
-    catch { }
+    catch {
+        # Intentionally suppressed: checking if 'code' command exists
+        $null = $_
+    }
 
     if (-not (Test-WingetAvailable)) {
         Exit-WithError "winget not available and VS Code not found. Install VS Code manually." $script:EXIT_WINGET_FAILED
@@ -1692,7 +1707,7 @@ function Install-VSCode {
     }
 
     try {
-        $output = winget install --id Microsoft.VisualStudioCode `
+        $null = winget install --id Microsoft.VisualStudioCode `
             --accept-source-agreements --accept-package-agreements `
             --silent --disable-interactivity 2>&1
 
@@ -1701,7 +1716,7 @@ function Install-VSCode {
 
             # Refresh PATH
             $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-                        [System.Environment]::GetEnvironmentVariable("Path", "User")
+            [System.Environment]::GetEnvironmentVariable("Path", "User")
 
             return "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe"
         }
@@ -1714,12 +1729,12 @@ function Install-VSCode {
     }
 }
 
-function Install-VSCodeExtensions {
+function Install-VSCodeExtension {
     Write-LogStep "7/7" "Installing VS Code extensions"
 
     # Refresh PATH to ensure code is available
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-                [System.Environment]::GetEnvironmentVariable("Path", "User")
+    [System.Environment]::GetEnvironmentVariable("Path", "User")
 
     $codePath = $null
     try {
@@ -1760,7 +1775,7 @@ function Install-VSCodeExtensions {
         }
 
         try {
-            $output = & $codePath --install-extension $ext --force 2>&1
+            $null = & $codePath --install-extension $ext --force 2>&1
 
             if ($LASTEXITCODE -eq 0) {
                 Write-LogSuccess "    Installed: $ext"
@@ -1781,6 +1796,9 @@ function Install-VSCodeExtensions {
 # Help
 #-------------------------------------------------------------------------------
 function Show-Help {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive CLI requires colored console output')]
+    param()
+
     $help = @"
 
 $($script:SCRIPT_NAME) v$($script:SCRIPT_VERSION) - DevContainers setup for Windows 11
@@ -1850,6 +1868,7 @@ LOG FILE:
 # Main Execution
 #-------------------------------------------------------------------------------
 function Show-Summary {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive CLI requires colored console output')]
     param([string]$WslDistroName)
 
     Write-Host ""
@@ -1885,6 +1904,9 @@ function Show-Summary {
 }
 
 function Main {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive CLI requires colored console output')]
+    param()
+
     if ($Help) {
         Show-Help
         exit $script:EXIT_SUCCESS
@@ -1948,18 +1970,18 @@ function Main {
     Write-LogInfo "Selected distribution: $($distroInfo.DisplayName)"
 
     # Enable WSL2
-    $needsReboot = Enable-WSL2Features
+    $needsReboot = Enable-WSL2Feature
 
     if ($needsReboot) {
         Request-Reboot -NextPhase 2 -SelectedDistro $Distro
         return  # Won't reach here normally
     }
 
-    # Configure .wslconfig 
+    # Configure .wslconfig
     Initialize-WslConfig
 
     # Check existing distros and install if needed
-    $existingDistros = Get-ExistingDistros
+    $existingDistros = Get-ExistingDistro
     $wslDistroName = $distroInfo.WslName
 
     # Check if selected distro already exists
@@ -1969,7 +1991,7 @@ function Main {
         $line -match "^$wslDistroName\s+"
     }
 
-    Write-LogDebug "Distro detection: looking for '$wslDistroName', found: $($distroExists -ne $null)"
+    Write-LogDebug "Distro detection: looking for '$wslDistroName', found: $($null -ne $distroExists)"
 
     $skipConfiguration = $false
 
@@ -2007,7 +2029,7 @@ function Main {
         }
 
         $null = Install-VSCode
-        Install-VSCodeExtensions
+        Install-VSCodeExtension
     }
     else {
         Write-LogInfo "Skipping Windows applications installation (-SkipApps)"

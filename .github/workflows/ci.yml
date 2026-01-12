@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: NCSA
+# Copyright (c) 2023-2026 Aryan Ameri
+#
+# =============================================================================
+# CI Workflow
+# Linting and formatting checks for shell and PowerShell scripts
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  SHFMT_VERSION: "3.12.0"
+  SHELLCHECK_VERSION: "0.11.0"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install shfmt
+        run: |
+          curl -fsSL "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64" -o shfmt
+          chmod +x shfmt
+          sudo mv shfmt /usr/local/bin/
+          shfmt --version
+
+      - name: Install shellcheck
+        run: |
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" | tar -xJf -
+          sudo mv "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/
+          shellcheck --version
+
+      - name: Check shell script formatting (shfmt - Google style)
+        run: |
+          shfmt -d -i 2 -ci -bn *.sh
+
+      - name: Lint shell scripts (shellcheck - strictest)
+        run: |
+          shellcheck -o all -S style *.sh
+
+      - name: Lint PowerShell scripts (PSScriptAnalyzer - strictest)
+        shell: pwsh
+        run: |
+          $results = Invoke-ScriptAnalyzer -Path *.ps1 -Recurse -Severity Error,Warning,Information
+          if ($results) {
+            $results | Format-Table -AutoSize
+            exit 1
+          }
+          Write-Host "PowerShell lint passed"

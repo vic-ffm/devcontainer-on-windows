@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: NCSA
+# Copyright (c) 2023-2026 Aryan Ameri
+#
+# =============================================================================
+# Release Workflow
+# Creates GitHub release with zip archive on tag push
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create release archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE_NAME="devcontainer-on-windows-${VERSION}"
+          mkdir -p "${ARCHIVE_NAME}"
+
+          # Copy all distributable files
+          cp *.sh "${ARCHIVE_NAME}/"
+          cp *.ps1 "${ARCHIVE_NAME}/"
+          cp *.bat "${ARCHIVE_NAME}/"
+          cp *.zsh "${ARCHIVE_NAME}/"
+          cp *.txt "${ARCHIVE_NAME}/"
+          cp *.ttf "${ARCHIVE_NAME}/"
+          cp LICENSE "${ARCHIVE_NAME}/"
+          cp README.md "${ARCHIVE_NAME}/"
+
+          # Create zip archive
+          zip -r "${ARCHIVE_NAME}.zip" "${ARCHIVE_NAME}"
+
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
+
+      - name: Generate checksum
+        run: |
+          sha256sum "${{ env.ARCHIVE_NAME }}.zip" > SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ARCHIVE_NAME }}.zip
+            SHA256SUMS
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
