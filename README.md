@@ -51,7 +51,7 @@ You'll need Administrator privileges and an internet connection.
 | Component | Version |
 |-----------|---------|
 | Bash | 5.2 |
-| Distribution | Ubuntu or Debian (default) |
+| Distribution | Debian 13 Trixie |
 
 The Linux scripts need root access (via sudo).
 
@@ -106,10 +106,9 @@ code --install-extension ms-vscode-remote.remote-wsl
 
 ## Supported Distributions
 
-| Distribution | Version | Support Until | Default |
-|--------------|---------|---------------|---------|
-| Debian | 13 Trixie | June 2030 | Yes |
-| Ubuntu | 24.04 LTS | April 2029 | No |
+| Distribution | Version | Support Until |
+|--------------|---------|---------------|
+| Debian | 13 Trixie | June 2030 |
 
 ## Options
 
@@ -117,7 +116,7 @@ code --install-extension ms-vscode-remote.remote-wsl
 
 | Parameter | What it does |
 |-----------|--------------|
-| `-Distro <Debian\|Ubuntu>` | Which distro to install (default: Debian) |
+| `-Distro Debian` | Which distro to install (only Debian supported) |
 | `-Resume` | Pick up where you left off after a restart |
 | `-DryRun` | Show what would happen without doing it |
 | `-NonInteractive` | No prompts; use defaults |
@@ -130,9 +129,6 @@ Examples:
 ```powershell
 # Default setup
 .\Setup-DevContainers.ps1
-
-# Use Ubuntu instead
-.\Setup-DevContainers.ps1 -Distro Ubuntu
 
 # See what it would do
 .\Setup-DevContainers.ps1 -DryRun -Verbose

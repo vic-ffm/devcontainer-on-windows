@@ -14,18 +14,17 @@
 #
 # USAGE:
 #   .\Setup-DevContainers.ps1
-#   .\Setup-DevContainers.ps1 -Distro Ubuntu
 #   .\Setup-DevContainers.ps1 -DryRun -Verbose
-#   .\Setup-DevContainers.ps1 -NonInteractive -Distro Debian
+#   .\Setup-DevContainers.ps1 -NonInteractive
 #
 # OPTIONS:
-#   -Distro           Distro to install: Debian (default) or Ubuntu
+#   -Distro           Distro to install: Debian (only supported distro)
 #   -Resume           Resume setup after reboot
 #   -DryRun           Show what would be done without making changes
 #   -NonInteractive   Skip all prompts, use defaults
 #   -SkipApps         Skip Windows Terminal/VS Code installation
 #   -SkipFonts        Skip MesloLGS NF font installation
-#   -Force            Overwrite existing configuration
+#   -Force            Force reinstall of Windows apps even if present
 #   -Help             Show help message
 #
 # LICENSE:            NCSA
@@ -37,7 +36,7 @@
 [CmdletBinding()]
 param(
     [Parameter(HelpMessage = "Linux distribution to install")]
-    [ValidateSet('Debian', 'Ubuntu')]
+    [ValidateSet('Debian')]
     [string]$Distro = 'Debian',
 
     [Parameter(HelpMessage = "Resume setup after reboot")]
@@ -97,6 +96,8 @@ $script:EXIT_DISTRO_FAILED = 5
 $script:EXIT_WINGET_FAILED = 6
 $script:EXIT_REBOOT_REQUIRED = 7
 $script:EXIT_USER_CANCELLED = 8
+$script:EXIT_NO_SLOT_AVAILABLE = 9
+$script:EXIT_DEBIAN_EXISTS = 10
 
 # Supported distros
 $script:SUPPORTED_DISTROS = @{
@@ -105,12 +106,6 @@ $script:SUPPORTED_DISTROS = @{
         DisplayName  = 'Debian 13 Trixie'
         IsDefault    = $true
         SupportUntil = '2030-06-30'
-    }
-    'Ubuntu' = @{
-        WslName      = 'Ubuntu-24.04'
-        DisplayName  = 'Ubuntu 24.04 LTS'
-        IsDefault    = $false
-        SupportUntil = '2029-04'
     }
 }
 
@@ -884,141 +879,328 @@ function Get-ExistingDistro {
     }
 }
 
-function Install-WslDistro {
-    param(
-        [Parameter(Mandatory)]
-        [string]$DistroKey
-    )
+function Get-NextAvailableDistroName {
+    <#
+    .SYNOPSIS
+    Finds the next available distro name in Debian-01 to Debian-99 range.
+    .OUTPUTS
+    Returns the next available name (e.g., "Debian-03"), or $null if all taken.
+    #>
 
-    $distroInfo = $script:SUPPORTED_DISTROS[$DistroKey]
-    $wslName = $distroInfo.WslName
-    $displayName = $distroInfo.DisplayName
-
-    Write-LogInfo "Installing $displayName..."
-    Write-LogInfo "  WSL Name: $wslName"
-    Write-LogInfo "  Support until: $($distroInfo.SupportUntil)"
-
-    if ($DryRun) {
-        Write-LogInfo "[DRY-RUN] Would execute: wsl --install -d $wslName --no-launch"
-        return $wslName
-    }
+    Write-LogDebug "Scanning for available distro slot..."
 
     try {
-        # Check for and clean up broken existing installation
-        $existingCheck = wsl --list --quiet 2>&1 | Out-String
-        $existingCheck = $existingCheck -replace '\x00', ''
-        if ($existingCheck -match "(?m)^$([regex]::Escape($wslName))\s*$") {
-            # Distro exists - test if it's usable
-            Write-LogDebug "Found existing $wslName, checking health..."
-            $null = wsl -d $wslName -u root --cd /tmp -- echo "health_check" 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                Write-LogWarn "Found broken $wslName installation, removing before reinstall..."
-                $null = wsl --unregister $wslName 2>$null
-                Start-Sleep -Seconds 3
+        # Get list of existing distros (quiet mode, just names)
+        $rawOutput = wsl --list --quiet 2>&1
+        $distroList = ($rawOutput | Out-String) -replace '\x00', '' -replace '\r', ''
+
+        # Handle WSL command failure (e.g., WSL not ready)
+        if ($LASTEXITCODE -ne 0) {
+            Write-LogDebug "wsl --list failed (exit code: $LASTEXITCODE), assuming no distros exist"
+            return "Debian-01"
+        }
+
+        $existingDistros = @($distroList -split "`n" |
+            Where-Object { $_ -match '\S' } |
+            ForEach-Object { $_.Trim() })
+
+        Write-LogDebug "Existing distros: $($existingDistros -join ', ')"
+
+        # Find first available slot (01 through 99)
+        for ($i = 1; $i -le 99; $i++) {
+            $candidateName = "Debian-{0:D2}" -f $i
+
+            # Case-insensitive check
+            $isUsed = $existingDistros | Where-Object {
+                $_.Equals($candidateName, [StringComparison]::OrdinalIgnoreCase)
             }
-            else {
-                # Distro exists and is healthy - return it
-                Write-LogInfo "Distro $wslName already exists and is healthy"
-                return $wslName
+
+            if (-not $isUsed) {
+                Write-LogDebug "Found available slot: $candidateName"
+                return $candidateName
             }
         }
 
-        # Install without launching
-        Write-LogInfo "Attempting installation via wsl --install..."
-        $output = wsl --install -d $wslName --no-launch 2>&1
+        Write-LogWarn "All Debian-01 through Debian-99 slots are in use"
+        return $null
+    }
+    catch {
+        Write-LogDebug "Error scanning distro slots: $_"
+        # On error, return first slot (will fail later if actually in use)
+        return "Debian-01"
+    }
+}
+
+function Test-BaseDebianPresent {
+    <#
+    .SYNOPSIS
+    Checks if a distro named 'Debian' (exactly) exists.
+    .OUTPUTS
+    Returns $true if 'Debian' exists, $false otherwise.
+    #>
+
+    try {
+        $rawOutput = wsl --list --quiet 2>&1
+        $distroList = ($rawOutput | Out-String) -replace '\x00', '' -replace '\r', ''
+
+        # Handle WSL command failure - assume Debian doesn't exist (safer to check again later)
+        if ($LASTEXITCODE -ne 0) {
+            Write-LogDebug "wsl --list failed in Test-BaseDebianPresent, assuming Debian doesn't exist"
+            return $false
+        }
+
+        $existingDistros = @($distroList -split "`n" |
+            Where-Object { $_ -match '\S' } |
+            ForEach-Object { $_.Trim() })
+
+        $debianExists = $existingDistros | Where-Object {
+            $_.Equals("Debian", [StringComparison]::OrdinalIgnoreCase)
+        }
+
+        return ($null -ne $debianExists)
+    }
+    catch {
+        Write-LogDebug "Error checking for Debian: $_"
+        return $false
+    }
+}
+
+function Install-WslDistroViaImport {
+    param(
+        [Parameter(Mandatory)]
+        [string]$TargetDistroName
+    )
+
+    $distroInfo = $script:SUPPORTED_DISTROS['Debian']
+    $displayName = $distroInfo.DisplayName
+
+    Write-LogInfo "Creating $displayName as '$TargetDistroName'..."
+
+    # CRITICAL SAFETY CHECK: Ensure no existing "Debian" distro
+    if (Test-BaseDebianPresent) {
+        Write-LogError "A distro named 'Debian' already exists."
+        Write-LogError "This script needs to temporarily use that name during installation."
+        Write-LogError ""
+        Write-LogError "Options:"
+        Write-LogError "  1. Backup and remove your existing Debian:"
+        Write-LogError "       wsl --export Debian C:\backup\debian.tar"
+        Write-LogError "       wsl --unregister Debian"
+        Write-LogError "  2. Rename it by export/import with a new name"
+        Write-LogError ""
+        Exit-WithError "Cannot proceed while 'Debian' distro exists" $script:EXIT_DEBIAN_EXISTS
+    }
+
+    if ($DryRun) {
+        Write-LogInfo "[DRY-RUN] Would create $TargetDistroName via export/import method"
+        return $TargetDistroName
+    }
+
+    # Generate random suffix for temp resources (matches shell scripts' SRANDOM pattern)
+    $randomSuffix = Get-Random -Maximum 999999
+    $tempTarballPath = Join-Path $env:TEMP "debian-rootfs-$randomSuffix.tar"
+
+    # Validate temp path is on local drive (required for WSL operations)
+    # UNC paths like \\server\share won't work
+    if ($tempTarballPath -notmatch '^[A-Za-z]:\\') {
+        $tempTarballPath = Join-Path $env:SystemDrive "Temp\debian-rootfs-$randomSuffix.tar"
+        Write-LogWarn "TEMP is not on local drive, using: $tempTarballPath"
+        # Ensure parent directory exists
+        $parentDir = Split-Path $tempTarballPath -Parent
+        if (-not (Test-Path $parentDir)) {
+            New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+        }
+    }
+
+    # Install location for imported distro
+    $installPath = Join-Path $env:LOCALAPPDATA "WSL\$TargetDistroName"
+
+    # Check if install path already exists (from failed previous run)
+    if (Test-Path $installPath) {
+        $existingFiles = Get-ChildItem $installPath -ErrorAction SilentlyContinue
+        if ($existingFiles) {
+            Write-LogError "Install path already contains data: $installPath"
+            Write-LogError "This may be from a failed previous run."
+            Write-LogError "Please remove it manually if safe: Remove-Item -Recurse '$installPath'"
+            Exit-WithError "Install path not empty: $installPath" $script:EXIT_DISTRO_FAILED
+        }
+    }
+
+    # Cleanup tracking flags (for LIFO rollback on failure)
+    $cleanupTempDistro = $false
+    $cleanupTarball = $false
+    $cleanupTargetDistro = $false
+    $cleanupInstallPath = $false
+
+    try {
+        # Step 1: Install temporary base Debian
+        Write-LogInfo "Step 1/5: Installing temporary base Debian..."
+
+        $output = wsl --install -d Debian --no-launch 2>&1
         $exitCode = $LASTEXITCODE
-        # Handle WSL's UTF-16LE output encoding
         $outputStr = ($output | Out-String) -replace '\x00', '' -replace '\r', ''
 
-        # Log the result for debugging
-        Write-LogInfo "Install result: exit code = $exitCode"
-        if ($outputStr.Trim()) {
-            Write-LogInfo "Output: $($outputStr.Trim().Substring(0, [Math]::Min(200, $outputStr.Trim().Length)))..."
-        }
+        Write-LogDebug "wsl --install exit code: $exitCode"
 
-        # Check errors
-        $isSparseError = $outputStr -match "Sparse" -or $outputStr -match "VHD" -or $outputStr -match "corruption"
-        $isFailure = $exitCode -ne 0
+        if ($exitCode -ne 0 -or $outputStr -match "Sparse|VHD|corruption") {
+            Write-LogWarn "wsl --install failed (exit=$exitCode), trying winget..."
 
-        if ($isSparseError -or $isFailure) {
-            Write-LogWarn "Standard installation failed (sparse=$isSparseError, exitCode=$exitCode), trying alternative method..."
-
-            # Shut down WSL
             wsl --shutdown 2>$null
             Start-Sleep -Seconds 3
 
-            # Try winget installation from Microsoft Store
-            Write-LogInfo "Attempting installation via winget (Microsoft Store)..."
-            $wingetId = switch ($wslName) {
-                "Debian" { "Debian.Debian" }
-                "Ubuntu-24.04" { "Canonical.Ubuntu.2404" }
-                "Ubuntu" { "Canonical.Ubuntu.2404" }
-                default { $null }
-            }
+            $wingetOutput = winget install --id Debian.Debian --source msstore `
+                --accept-source-agreements --accept-package-agreements `
+                --disable-interactivity 2>&1
+            $wingetExitCode = $LASTEXITCODE
+            $wingetStr = ($wingetOutput | Out-String)
 
-            if ($wingetId) {
-                $wingetOutput = winget install --id $wingetId --source msstore --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1
-                $wingetExitCode = $LASTEXITCODE
-                $wingetStr = ($wingetOutput | Out-String)
-                Write-LogInfo "Winget result: exit code = $wingetExitCode"
-
-                if ($wingetExitCode -eq 0 -or $wingetStr -match "successfully installed" -or $wingetStr -match "already installed") {
-                    Write-LogSuccess "Installed via Microsoft Store"
-                    Start-Sleep -Seconds 5
-                }
-                else {
-                    # Last resort: try wsl --install without --no-launch
-                    Write-LogWarn "Winget failed, trying wsl --install without --no-launch..."
-                    wsl --shutdown 2>$null
-                    Start-Sleep -Seconds 3
-                    $output = wsl --install -d $wslName 2>&1
-                    $outputStr = ($output | Out-String) -replace '\x00', '' -replace '\r', ''
-                    $exitCode = $LASTEXITCODE
-
-                    if ($exitCode -ne 0) {
-                        throw "All installation methods failed. Last error: $outputStr"
-                    }
-                }
-            }
-            else {
-                throw "No alternative installation method available for: $wslName"
+            if ($wingetExitCode -ne 0 -and $wingetStr -notmatch "successfully installed|already installed") {
+                throw "Failed to install base Debian: wsl exit=$exitCode, winget exit=$wingetExitCode"
             }
         }
-        elseif ($exitCode -ne 0) {
-            throw "wsl --install failed: $outputStr"
-        }
 
-        # Wait for installation to complete
-        Write-LogInfo "Waiting for distribution to be ready..."
+        # Wait for installation to settle
         Start-Sleep -Seconds 5
 
-        # Verify distro is registered in WSL
-        $maxRetries = 6
-        $distroRegistered = $false
-
-        for ($retry = 0; $retry -lt $maxRetries; $retry++) {
-            $listOutput = wsl --list --quiet 2>&1 | Out-String
-            $listOutput = $listOutput -replace '\x00', ''
-            if ($listOutput -match "(?m)^$([regex]::Escape($wslName))\s*$") {
-                $distroRegistered = $true
-                Write-LogDebug "Distro verified in wsl --list after $($retry + 1) attempt(s)"
-                break
-            }
-            if ($retry -lt ($maxRetries - 1)) {
-                Write-LogDebug "Distro not yet visible, waiting... (attempt $($retry + 1)/$maxRetries)"
-                Start-Sleep -Seconds 5
-            }
+        # Verify base Debian exists
+        if (-not (Test-BaseDebianPresent)) {
+            throw "Base Debian distro not found after installation"
         }
 
-        if (-not $distroRegistered) {
-            throw "Distribution $wslName not found in wsl --list after installation"
+        $cleanupTempDistro = $true
+        Write-LogSuccess "Base Debian installed"
+
+        # Step 2: Export rootfs to tarball (with timeout protection)
+        Write-LogInfo "Step 2/5: Exporting rootfs to tarball..."
+        Write-LogDebug "Tarball path: $tempTarballPath"
+
+        # Use timeout wrapper for export (can take time for large distros)
+        $exportTimeout = 300  # 5 minutes should be plenty for base Debian
+        $exportPsi = New-Object System.Diagnostics.ProcessStartInfo
+        $exportPsi.FileName = "wsl.exe"
+        # Quote the tarball path to handle spaces in username paths
+        $exportPsi.Arguments = "--export Debian `"$tempTarballPath`""
+        $exportPsi.RedirectStandardOutput = $true
+        $exportPsi.RedirectStandardError = $true
+        $exportPsi.UseShellExecute = $false
+        $exportPsi.CreateNoWindow = $true
+
+        $exportProcess = [System.Diagnostics.Process]::Start($exportPsi)
+
+        if (-not $exportProcess.WaitForExit($exportTimeout * 1000)) {
+            $exportProcess.Kill()
+            throw "Export timed out after $exportTimeout seconds"
         }
 
-        Write-LogSuccess "$displayName installed successfully"
-        return $wslName
+        if ($exportProcess.ExitCode -ne 0) {
+            $exportError = $exportProcess.StandardError.ReadToEnd()
+            throw "Export failed (exit code: $($exportProcess.ExitCode)): $exportError"
+        }
+
+        $cleanupTarball = $true
+
+        # Verify tarball exists and has reasonable size
+        if (-not (Test-Path $tempTarballPath)) {
+            throw "Export tarball not found: $tempTarballPath"
+        }
+
+        $tarballSize = (Get-Item $tempTarballPath).Length
+        Write-LogDebug "Tarball size: $([Math]::Round($tarballSize / 1MB, 2)) MB"
+
+        # Base Debian rootfs should be at least 200MB; 50MB is suspiciously small
+        if ($tarballSize -lt 50MB) {
+            throw "Tarball suspiciously small ($([Math]::Round($tarballSize / 1MB, 2)) MB) - export may have failed"
+        }
+
+        Write-LogSuccess "Rootfs exported ($([Math]::Round($tarballSize / 1MB, 0)) MB)"
+
+        # Step 3: Unregister the temporary base Debian
+        Write-LogInfo "Step 3/5: Cleaning up temporary base distro..."
+
+        $null = wsl --unregister Debian 2>&1
+        $unregExitCode = $LASTEXITCODE
+
+        if ($unregExitCode -ne 0) {
+            Write-LogWarn "Unregister returned exit code $unregExitCode (may be OK)"
+        }
+
+        $cleanupTempDistro = $false  # Successfully removed
+        Write-LogSuccess "Temporary base distro removed"
+
+        # Step 4: Import as target name
+        Write-LogInfo "Step 4/5: Importing as $TargetDistroName..."
+
+        if (-not (Test-Path $installPath)) {
+            New-Item -ItemType Directory -Path $installPath -Force | Out-Null
+            $cleanupInstallPath = $true
+        }
+
+        # Use splatting for proper argument handling with paths containing spaces
+        $importArgs = @(
+            "--import"
+            $TargetDistroName
+            "`"$installPath`""
+            "`"$tempTarballPath`""
+        )
+        $importOutput = & wsl.exe @importArgs 2>&1
+        $importExitCode = $LASTEXITCODE
+        $importStr = ($importOutput | Out-String) -replace '\x00', ''
+
+        if ($importExitCode -ne 0) {
+            throw "Import failed (exit code: $importExitCode): $importStr"
+        }
+
+        $cleanupTargetDistro = $true
+        $cleanupInstallPath = $false  # Now owned by WSL
+        Write-LogSuccess "$TargetDistroName imported"
+
+        # Step 5: Clean up tarball
+        Write-LogInfo "Step 5/5: Cleaning up tarball..."
+
+        Remove-Item $tempTarballPath -Force -ErrorAction SilentlyContinue
+        $cleanupTarball = $false
+
+        Write-LogSuccess "Tarball removed"
+
+        # Verify the imported distro is usable
+        Write-LogInfo "Verifying $TargetDistroName..."
+        $verifyResult = wsl -d $TargetDistroName -u root --cd /tmp -- echo "health_check" 2>&1
+        $verifyStr = ($verifyResult | Out-String) -replace '\x00', ''
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Imported distro health check failed: $verifyStr"
+        }
+
+        Write-LogSuccess "$displayName created as '$TargetDistroName'"
+        $cleanupTargetDistro = $false  # Success - don't cleanup
+
+        return $TargetDistroName
     }
     catch {
-        Exit-WithError "Failed to install $displayName`: $_" $script:EXIT_DISTRO_FAILED
+        Write-LogError "Failed to create distro: $_"
+
+        # LIFO Cleanup on failure (reverse order of creation)
+
+        if ($cleanupTargetDistro) {
+            Write-LogInfo "Rolling back: removing $TargetDistroName..."
+            $null = wsl --unregister $TargetDistroName 2>&1
+        }
+
+        if ($cleanupInstallPath -and (Test-Path $installPath)) {
+            Write-LogInfo "Rolling back: removing install directory..."
+            Remove-Item -Path $installPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        if ($cleanupTarball -and (Test-Path $tempTarballPath)) {
+            Write-LogInfo "Rolling back: removing tarball..."
+            Remove-Item $tempTarballPath -Force -ErrorAction SilentlyContinue
+        }
+
+        if ($cleanupTempDistro) {
+            Write-LogInfo "Rolling back: removing temporary Debian..."
+            $null = wsl --unregister Debian 2>&1
+        }
+
+        Exit-WithError "Failed to create $TargetDistroName`: $_" $script:EXIT_DISTRO_FAILED
     }
 }
 
@@ -1318,9 +1500,11 @@ function Initialize-WslDistro {
     catch {
         Write-LogError "Linux environment configuration failed: $_"
 
-        # Attempt to clean up the broken distro to allow fresh retry
-        Write-LogWarn "Cleaning up failed installation..."
-        $null = wsl --unregister $WslDistroName 2>$null
+        # Note: We do NOT delete the distro on configuration failure.
+        # This allows the user to inspect what went wrong.
+        Write-LogWarn "The distro '$WslDistroName' remains registered for inspection."
+        Write-LogWarn "To clean up manually, run: wsl --unregister $WslDistroName"
+        Write-LogWarn "To retry, run this script again (it will create a new distro)."
 
         # Clear registry state
         Clear-SetupState
@@ -1807,26 +1991,22 @@ USAGE:
     .\$($script:SCRIPT_NAME) [OPTIONS]
 
 OPTIONS:
-    -Distro <name>     Distribution to install: Debian (default) or Ubuntu
+    -Distro <name>     Distribution to install: Debian (only supported distro)
     -Resume            Resume setup after reboot
     -DryRun            Preview without making changes
     -NonInteractive    Skip all prompts, use defaults
     -SkipApps          Skip Windows Terminal/VS Code installation
     -SkipFonts         Skip MesloLGS NF font installation
-    -Force             Overwrite existing configuration
+    -Force             Force reinstall of Windows apps even if present
     -Verbose           Enable verbose output
     -Help              Show this help message
 
 SUPPORTED DISTRIBUTIONS:
-    Debian    Debian 13 Trixie (default) - support until 2030
-    Ubuntu    Ubuntu 24.04 LTS - support until 2029
+    Debian    Debian 13 Trixie - support until 2030
 
 EXAMPLES:
-    # Standard setup with Debian (default)
+    # Standard setup with Debian
     .\$($script:SCRIPT_NAME)
-
-    # Setup with Ubuntu
-    .\$($script:SCRIPT_NAME) -Distro Ubuntu
 
     # Preview what would happen
     .\$($script:SCRIPT_NAME) -DryRun -Verbose
@@ -1980,41 +2160,26 @@ function Main {
     # Configure .wslconfig
     Initialize-WslConfig
 
-    # Check existing distros and install if needed
-    $existingDistros = Get-ExistingDistro
-    $wslDistroName = $distroInfo.WslName
-
-    # Check if selected distro already exists
-    $distroExists = $existingDistros | Where-Object {
-        $line = $_.Trim()
-        $line = $line -replace '^\*\s*', ''
-        $line -match "^$wslDistroName\s+"
+    # Always create a new distro with unique sequential name
+    $wslDistroName = Get-NextAvailableDistroName
+    if (-not $wslDistroName) {
+        Write-LogError "All distro slots (Debian-01 through Debian-99) are in use."
+        Write-LogError ""
+        Write-LogError "To free up slots, unregister distros you no longer need:"
+        Write-LogError "  wsl --unregister Debian-XX"
+        Write-LogError ""
+        Write-LogError "To see all distros:"
+        Write-LogError "  wsl --list --verbose"
+        Exit-WithError "No available distro slots (Debian-01 to Debian-99 all in use)" $script:EXIT_NO_SLOT_AVAILABLE
     }
 
-    Write-LogDebug "Distro detection: looking for '$wslDistroName', found: $($null -ne $distroExists)"
+    Write-LogInfo "Target distro name: $wslDistroName"
 
-    $skipConfiguration = $false
+    # Create the distro via export/import workflow
+    $wslDistroName = Install-WslDistroViaImport -TargetDistroName $wslDistroName
 
-    if ($distroExists -and -not $Force) {
-        Write-LogInfo "$($distroInfo.DisplayName) is already installed"
-
-        if (-not $NonInteractive) {
-            $reconfigure = Get-Confirmation -Prompt "Reconfigure existing installation?" -Default $true
-            if (-not $reconfigure) {
-                Write-LogInfo "Skipping configuration - using existing installation"
-                $skipConfiguration = $true
-            }
-        }
-    }
-    else {
-        # Distro doesn't exist - install it
-        $wslDistroName = Install-WslDistro -DistroKey $Distro
-    }
-
-    # Configure Linux environment
-    if (-not $skipConfiguration) {
-        Initialize-WslDistro -WslDistroName $wslDistroName
-    }
+    # Always configure the newly created distro (no skip logic)
+    Initialize-WslDistro -WslDistroName $wslDistroName
 
     # Windows applications
     if (-not $SkipApps) {
@@ -2036,7 +2201,7 @@ function Main {
     }
 
     # Verify VS Code integration in WSL
-    if (-not $skipConfiguration) {
+    if (-not $SkipApps) {
         Write-LogInfo "Verifying VS Code integration in WSL..."
         $codeTest = wsl -d $wslDistroName --cd ~ -- bash -c 'source ~/.bashrc && which code 2>/dev/null || echo "NOT_FOUND"' 2>&1 | Out-String
         $codeTest = $codeTest -replace '\x00', '' -replace '\r?\n', ''

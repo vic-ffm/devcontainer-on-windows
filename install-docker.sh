@@ -5,12 +5,12 @@
 #
 # DESCRIPTION:
 #   Script to install or remove Docker Engine on WSL2 systems.
-#   Supports any Ubuntu/Debian version or variant.
+#   Supports Debian and Debian-based distributions.
 #   Non-interactive and idempotent.
 #
 # REQUIREMENTS:
 #   Bash 5.2+
-#   Ubuntu 24.04+ or Debian 12+ in WSL2
+#   Debian 13 Trixie (or Debian 12+) in WSL2
 #
 # USAGE:
 #   curl -fsSL https://example.com/install-docker-wsl2.sh | sudo bash
@@ -88,7 +88,7 @@ declare -r DOCKER_GPG_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 
 # Docker GPG key SHA256 checksum (defense-in-depth verification)
 # NOTE: This is secondary to fingerprint verification. Update when Docker rotates keys:
-#   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sha256sum
+#   curl -fsSL https://download.docker.com/linux/debian/gpg | sha256sum
 # Then verify the fingerprint matches DOCKER_GPG_FINGERPRINT before updating.
 declare -r DOCKER_GPG_SHA256="1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570"
 
@@ -151,8 +151,7 @@ declare -ra CONFLICTING_PACKAGES=(
 
 # Fallback codenames for forward compatibility
 declare -rA FALLBACK_CODENAMES=(
-  [ubuntu]="noble jammy focal"
-  [debian]="bookworm bullseye"
+  [debian]="trixie bookworm bullseye"
 )
 
 # Files/directories managed by this installer (for removal)
@@ -908,29 +907,23 @@ detect_distribution() {
   source /etc/os-release
 
   DISTRO_ID="${ID:-}"
-  DISTRO_CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+  DISTRO_CODENAME="${VERSION_CODENAME:-}"
 
   log_debug "Detected: ID=${DISTRO_ID}, Codename=${DISTRO_CODENAME}"
 
   # Validate distribution family
   case "${DISTRO_ID@L}" in
-    ubuntu)
-      DISTRO_BASE="ubuntu"
-      ;;
     debian)
       DISTRO_BASE="debian"
       ;;
     *)
       # Check derivatives via ID_LIKE
       local -r id_like="${ID_LIKE:-}"
-      if [[ ${id_like} == *ubuntu* ]]; then
-        DISTRO_BASE="ubuntu"
-        log_warn "Detected ${DISTRO_ID@Q} (Ubuntu-derivative)"
-      elif [[ ${id_like} == *debian* ]]; then
+      if [[ ${id_like} == *debian* ]]; then
         DISTRO_BASE="debian"
         log_warn "Detected ${DISTRO_ID@Q} (Debian-derivative)"
       else
-        die "Unsupported distribution: ${DISTRO_ID}. Requires Ubuntu/Debian-based system." "${EXIT_UNSUPPORTED_DISTRO}"
+        die "Unsupported distribution: ${DISTRO_ID}. Requires Debian-based system." "${EXIT_UNSUPPORTED_DISTRO}"
       fi
       ;;
   esac
@@ -2114,7 +2107,7 @@ ${COLORS[bold]}GENERAL OPTIONS:${COLORS[reset]}
     --help, -h         Show this help
 
 ${COLORS[bold]}SUPPORTED:${COLORS[reset]}
-    Ubuntu/Debian (any version) - auto-detects, falls back if needed
+    Debian (any version) - auto-detects, falls back if needed
 
 ${COLORS[bold]}EXAMPLES:${COLORS[reset]}
     # Install Docker
@@ -2185,7 +2178,7 @@ parse_arguments() {
         shift
         ;;
       --version)
-        [[ -n ${2:-} ]] || die "--version requires VERSION (e.g., 5:24.0.7-1~ubuntu.22.04~jammy)" "${EXIT_INVALID_ARGS}"
+        [[ -n ${2:-} ]] || die "--version requires VERSION (e.g., 5:24.0.7-1~debian.12~bookworm)" "${EXIT_INVALID_ARGS}"
         DOCKER_VERSION="${2}"
         shift 2
         ;;

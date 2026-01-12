@@ -8,7 +8,7 @@
 #
 # REQUIREMENTS:
 #   Bash 5.2+
-#   Ubuntu 24.04+ or Debian 12+ in WSL2
+#   Debian 13 Trixie (or Debian 12+) in WSL2
 #
 # USAGE:
 #   sudo ./install-shell-customization.sh
@@ -1022,6 +1022,53 @@ ZSHRC_EOF
   log_success "Shell environment configured"
 }
 
+precache_antidote_plugins() {
+  log_info "Pre-caching Antidote plugins (prevents race condition on first shell)..."
+
+  if [[ ${DRY_RUN} == true ]]; then
+    log_info "[DRY-RUN] Would pre-cache Antidote plugins"
+    return 0
+  fi
+
+  local -r plugins_txt="${ZSH_PLUGINS_FILE}"
+  local -r plugins_zsh="${USER_HOME}/.zsh_plugins.zsh"
+  local -r cache_dir="${USER_HOME}/.cache/antidote"
+
+  # Create cache directory
+  sudo -u "${TARGET_USER}" mkdir -p "${cache_dir}"
+
+  # Run antidote bundle to download plugins and generate static file
+  # Must source antidote first, then run bundle
+  # This clones all plugins to ~/.cache/antidote/ and generates ~/.zsh_plugins.zsh
+  log_info "Downloading plugins and generating static loader..."
+
+  local bundle_output
+  local -i bundle_rc=0
+  bundle_output=$(sudo -u "${TARGET_USER}" zsh -c "
+    source '${ANTIDOTE_DIR}/antidote.zsh'
+    antidote bundle < '${plugins_txt}' > '${plugins_zsh}'
+  " 2>&1) || bundle_rc=$?
+
+  # Log output in verbose mode
+  if [[ -n ${bundle_output} && ${VERBOSE} == true ]]; then
+    while IFS= read -r line; do
+      log_debug "${line}"
+    done <<<"${bundle_output}"
+  fi
+
+  if ((bundle_rc == 0)); then
+    chown "${TARGET_USER}:${TARGET_USER}" "${plugins_zsh}"
+    chmod 644 "${plugins_zsh}"
+    register_created_file "${plugins_zsh}"
+    local -i repo_count
+    repo_count=$(find "${cache_dir}" -maxdepth 1 -type d 2>/dev/null | wc -l) || repo_count=0
+    log_success "Antidote plugins pre-cached (${repo_count} repos)"
+  else
+    log_warn "Plugin pre-caching had issues (non-fatal)"
+    log_warn "Plugins will be downloaded on first shell startup"
+  fi
+}
+
 #-------------------------------------------------------------------------------
 # Removal Functions
 #-------------------------------------------------------------------------------
@@ -1673,6 +1720,7 @@ main() {
   install_antidote
   install_mise
   configure_shell
+  precache_antidote_plugins
 
   # Verify
   # shellcheck disable=SC2310  # Intentional: allow verification to fail gracefully
