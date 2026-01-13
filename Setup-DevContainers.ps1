@@ -470,6 +470,46 @@ function Invoke-WslWithTimeout {
     }
 }
 
+function Test-WslFileTransferIntegrity {
+    <#
+    .SYNOPSIS
+    Verifies a file was transferred to WSL without truncation by comparing sizes.
+    .PARAMETER SourcePath
+    The Windows source file path.
+    .PARAMETER WslPath
+    The destination path inside WSL.
+    .PARAMETER Distro
+    The WSL distribution name.
+    .OUTPUTS
+    Returns $true if sizes match. Throws on mismatch or error.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$SourcePath,
+        [Parameter(Mandatory)]
+        [string]$WslPath,
+        [Parameter(Mandatory)]
+        [string]$Distro
+    )
+
+    $fileName = Split-Path -Leaf $SourcePath
+    $sourceSize = (Get-Item $SourcePath).Length
+
+    $sizeOutput = wsl -d $Distro -u root --cd /tmp -- stat -c '%s' $WslPath 2>&1
+    $transferredSize = ($sizeOutput | Out-String).Trim() -replace '\x00', '' -replace '\r', ''
+
+    if ($LASTEXITCODE -ne 0 -or -not $transferredSize) {
+        throw "Could not verify file transfer: stat failed for $WslPath (exit code: $LASTEXITCODE)"
+    }
+
+    if ([long]$transferredSize -ne $sourceSize) {
+        throw "File integrity check failed: $fileName size mismatch (source: $sourceSize bytes, transferred: $transferredSize bytes)"
+    }
+
+    Write-LogDebug "Verified transfer: $fileName ($sourceSize bytes)"
+    return $true
+}
+
 #-------------------------------------------------------------------------------
 # Debian Rootfs Download
 #-------------------------------------------------------------------------------
@@ -508,6 +548,17 @@ function Get-DebianRootfs {
         $downloadTime = (Get-Date) - $downloadStart
         $appxSize = (Get-Item $appxPath).Length
         Write-LogDebug "Downloaded $([Math]::Round($appxSize / 1MB, 1)) MB in $([Math]::Round($downloadTime.TotalSeconds, 1))s"
+
+        # Verify Authenticode signature (supply-chain protection)
+        Write-LogInfo "Verifying package signature..."
+        $signature = Get-AuthenticodeSignature -FilePath $appxPath
+        if ($signature.Status -ne 'Valid') {
+            throw "Downloaded package has invalid Authenticode signature: $($signature.StatusMessage)"
+        }
+        if ($signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            throw "Downloaded package not signed by Microsoft (Subject: $($signature.SignerCertificate.Subject))"
+        }
+        Write-LogDebug "Package signature valid: $($signature.SignerCertificate.Subject)"
 
         Write-LogInfo "Extracting rootfs from package..."
         Expand-Archive -Path $appxPath -DestinationPath $extractPath -Force -ErrorAction Stop
@@ -766,6 +817,13 @@ function Initialize-WslConfig {
         Write-LogDebug "Added sparseVhd=false to existing [experimental] section"
     }
 
+    # Ensure autoMemoryReclaim is configured (separate from sparseVhd logic)
+    if ($configContent -match "\[experimental\]" -and $configContent -notmatch "autoMemoryReclaim\s*=") {
+        $configContent = $configContent -replace "(\[experimental\])", "`$1`nautoMemoryReclaim=gradual"
+        $configChanged = $true
+        Write-LogDebug "Added autoMemoryReclaim=gradual to existing [experimental] section"
+    }
+
     if ($configChanged) {
         Write-LogInfo "Updating .wslconfig with recommended settings..."
 
@@ -799,6 +857,14 @@ function Disable-SparseOnExistingDistro {
     # Get list of existing distros
     $rawOutput = wsl --list --quiet 2>&1
     $distroList = ($rawOutput | Out-String) -replace '\x00', '' -replace '\r', ''
+
+    # Handle WSL command failure (e.g., WSL not ready)
+    if ($LASTEXITCODE -ne 0) {
+        Write-LogWarn "Could not enumerate WSL distributions (exit code: $LASTEXITCODE)"
+        Write-LogDebug "WSL output: $distroList"
+        return
+    }
+
     $distros = @($distroList -split "`n" | Where-Object { $_ -match '\S' } | ForEach-Object { $_.Trim() })
 
     if ($distros.Count -eq 0) {
@@ -1362,12 +1428,15 @@ function Initialize-WslDistro {
                 throw "Script files not found in WSL after transfer"
             }
 
-            # Verify the critical function name exists in the docker script (catches truncation issues)
-            $validateCheck = wsl -d $WslDistroName -u root --cd /tmp -- grep -c 'validate_user' /tmp/install-docker.sh 2>$null
-            $validateCount = ($validateCheck | Out-String).Trim() -replace '\x00', ''
-            Write-LogDebug "validate_user occurrences: $validateCount"
-            if ([int]$validateCount -lt 3) {
-                throw "File integrity check failed: install-docker.sh appears to be corrupted (validate_user count: $validateCount)"
+            # Verify all transferred scripts (catches truncation during Windows->WSL copy)
+            Write-LogDebug "Verifying script transfer integrity..."
+            Test-WslFileTransferIntegrity -SourcePath $setupScript -WslPath "/tmp/setup-wsl-devcontainers.sh" -Distro $WslDistroName
+            Test-WslFileTransferIntegrity -SourcePath $dockerScript -WslPath "/tmp/install-docker.sh" -Distro $WslDistroName
+            if ($tempGithubPath) {
+                Test-WslFileTransferIntegrity -SourcePath $githubScript -WslPath "/tmp/install-github-cli.sh" -Distro $WslDistroName
+            }
+            if ($tempShellPath) {
+                Test-WslFileTransferIntegrity -SourcePath $shellScript -WslPath "/tmp/install-shell-customization.sh" -Distro $WslDistroName
             }
 
             # Make scripts executable - verify each file and chmod individually
@@ -1456,9 +1525,12 @@ function Install-WindowsTerminal {
 
     try {
         $terminal = Get-AppxPackage -Name "Microsoft.WindowsTerminal" -ErrorAction SilentlyContinue
-        if ($terminal) {
+        if ($terminal -and -not $Force) {
             Write-LogSuccess "Windows Terminal already installed (v$($terminal.Version))"
             return
+        }
+        if ($terminal -and $Force) {
+            Write-LogInfo "Force reinstalling Windows Terminal (current: v$($terminal.Version))..."
         }
     }
     catch {
@@ -1787,16 +1859,23 @@ function Install-VSCode {
     foreach ($path in $vscodePaths) {
         if (Test-Path $path) {
             $version = (Get-Item $path).VersionInfo.ProductVersion
-            Write-LogSuccess "VS Code already installed (v$version)"
-            return $path
+            if (-not $Force) {
+                Write-LogSuccess "VS Code already installed (v$version)"
+                return $path
+            }
+            Write-LogInfo "Force reinstalling VS Code (current: v$version)..."
+            break
         }
     }
 
     try {
         $codePath = (Get-Command code -ErrorAction SilentlyContinue).Source
-        if ($codePath) {
+        if ($codePath -and -not $Force) {
             Write-LogSuccess "VS Code already installed: $codePath"
             return $codePath
+        }
+        if ($codePath -and $Force) {
+            Write-LogInfo "Force reinstalling VS Code (found: $codePath)..."
         }
     }
     catch {

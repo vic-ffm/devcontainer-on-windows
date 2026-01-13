@@ -72,3 +72,55 @@ lint-powershell:
 # Run all lint checks
 lint: lint-shell lint-powershell
     @echo "All lint checks passed"
+
+# =============================================================================
+# RELEASE
+# =============================================================================
+
+# Create a release: update version, run CI, commit, push, tag, and push tag
+tag VERSION MESSAGE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Validate version format
+    if [[ ! "{{VERSION}}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-.*)?$ ]]; then
+        echo "ERROR: Version must match vX.Y.Z or vX.Y.Z-suffix (e.g., v1.0.0, v1.0.0-rc1)"
+        exit 1
+    fi
+
+    # Extract version without 'v' prefix
+    SEMVER="{{VERSION}}"
+    SEMVER="${SEMVER#v}"
+    echo "Updating version to $SEMVER..."
+
+    # Update version in PowerShell script
+    sed -i "s/^\(\$script:SCRIPT_VERSION = \"\)[^\"]*\"/\1$SEMVER\"/" Setup-DevContainers.ps1
+    echo "Updated Setup-DevContainers.ps1"
+
+    # Update version in Bash script
+    sed -i "s/^\(declare -r SCRIPT_VERSION=\"\)[^\"]*/\1$SEMVER/" setup-wsl-devcontainers.sh
+    echo "Updated setup-wsl-devcontainers.sh"
+
+    # Run CI first
+    echo "Running CI checks..."
+    just ci
+
+    # Commit changes
+    MSG="${MESSAGE:-Release {{VERSION}}}"
+    echo "Committing changes..."
+    git add .
+    git commit -m "$MSG"
+    echo "Pushing to remote..."
+    git push
+
+    # Create and push tag
+    echo "Creating tag {{VERSION}}..."
+    git tag -a "{{VERSION}}" -m "Release {{VERSION}}"
+    echo "Pushing tag to remote..."
+    git push origin "{{VERSION}}"
+
+    echo ""
+    echo "============================================"
+    echo "Release {{VERSION}} complete!"
+    echo "GitHub Actions will now build and publish."
+    echo "============================================"
