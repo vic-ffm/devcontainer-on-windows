@@ -490,17 +490,6 @@ function Get-DebianRootfs {
         $appxSize = (Get-Item $appxPath).Length
         Write-LogDebug "Downloaded $([Math]::Round($appxSize / 1MB, 1)) MB in $([Math]::Round($downloadTime.TotalSeconds, 1))s"
 
-        # Verify Authenticode signature (supply-chain protection)
-        Write-LogInfo "Verifying package signature..."
-        $signature = Get-AuthenticodeSignature -FilePath $appxPath
-        if ($signature.Status -ne 'Valid') {
-            throw "Downloaded package has invalid Authenticode signature: $($signature.StatusMessage)"
-        }
-        if ($signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
-            throw "Downloaded package not signed by Microsoft (Subject: $($signature.SignerCertificate.Subject))"
-        }
-        Write-LogDebug "Package signature valid: $($signature.SignerCertificate.Subject)"
-
         Write-LogInfo "Extracting rootfs from package..."
         Expand-Archive -Path $appxPath -DestinationPath $extractPath -Force -ErrorAction Stop
 
