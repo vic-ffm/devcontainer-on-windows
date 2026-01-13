@@ -272,6 +272,41 @@ function Get-PosixEscapedPath {
     return $Path -replace "'", "'\\''"
 }
 
+function Get-SystemArchitecture {
+    <#
+    .SYNOPSIS
+    Detects the system CPU architecture.
+    .DESCRIPTION
+    Uses .NET RuntimeInformation for reliable architecture detection across
+    PowerShell versions. Falls back to environment variables if needed.
+    .OUTPUTS
+    Returns 'x64' or 'ARM64' based on system architecture.
+    #>
+    try {
+        $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+        switch ($arch) {
+            'X64'   { return 'x64' }
+            'Arm64' { return 'ARM64' }
+            default {
+                Write-LogDebug "Unknown architecture from RuntimeInformation: $arch"
+            }
+        }
+    }
+    catch {
+        Write-LogDebug "RuntimeInformation not available: $_"
+    }
+
+    # Fallback to environment variable for older PowerShell or edge cases
+    switch ($env:PROCESSOR_ARCHITECTURE) {
+        'AMD64' { return 'x64' }
+        'ARM64' { return 'ARM64' }
+        default {
+            Write-LogWarn "Could not detect architecture, defaulting to x64"
+            return 'x64'
+        }
+    }
+}
+
 #-------------------------------------------------------------------------------
 # Script Locking
 #-------------------------------------------------------------------------------
@@ -493,6 +528,42 @@ function Get-DebianRootfs {
         Write-LogInfo "Extracting rootfs from package..."
         Expand-Archive -Path $appxPath -DestinationPath $extractPath -Force -ErrorAction Stop
 
+        # Check if this is an appxbundle (contains nested .appx files for different architectures)
+        $nestedAppx = Get-ChildItem -Path $extractPath -Filter "*.appx" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch 'scale-\d+' }  # Exclude display scaling variants
+
+        if ($nestedAppx) {
+            # This is an appxbundle - need to extract the architecture-specific appx first
+            Write-LogInfo "Detected appxbundle structure, extracting architecture-specific package..."
+
+            $systemArch = Get-SystemArchitecture
+            Write-LogDebug "System architecture: $systemArch"
+
+            # Find the matching architecture appx (case-insensitive match)
+            $archAppx = $nestedAppx | Where-Object { $_.Name -match "_$systemArch\.appx$" } | Select-Object -First 1
+
+            if (-not $archAppx) {
+                # Fallback: try to find any x64 or ARM64 appx
+                $archAppx = $nestedAppx | Where-Object { $_.Name -match '_(x64|ARM64)\.appx$' } | Select-Object -First 1
+                if ($archAppx) {
+                    Write-LogWarn "Using fallback appx: $($archAppx.Name)"
+                }
+            }
+
+            if (-not $archAppx) {
+                throw "No architecture-specific appx found for $systemArch. Available packages: $($nestedAppx.Name -join ', ')"
+            }
+
+            Write-LogDebug "Extracting inner package: $($archAppx.Name)"
+
+            # Extract the inner appx to get the actual rootfs
+            $innerExtractPath = Join-Path $extractPath "inner-appx"
+            Expand-Archive -Path $archAppx.FullName -DestinationPath $innerExtractPath -Force -ErrorAction Stop
+
+            # Update search path to look inside the inner extraction
+            $extractPath = $innerExtractPath
+        }
+
         # Find the rootfs tarball (install.tar.gz in Debian's .appx)
         $rootfsGz = Get-ChildItem -Path $extractPath -Filter "install.tar.gz" -Recurse -ErrorAction SilentlyContinue |
             Select-Object -First 1
@@ -503,7 +574,7 @@ function Get-DebianRootfs {
         }
 
         if (-not $rootfsGz) {
-            throw "No rootfs tarball found in .appx package. Contents: $(Get-ChildItem $extractPath -Recurse -Name | Out-String)"
+            throw "No rootfs tarball found in package. Contents: $(Get-ChildItem $extractPath -Recurse -Name | Out-String)"
         }
 
         Write-LogDebug "Found rootfs: $($rootfsGz.Name) ($([Math]::Round($rootfsGz.Length / 1MB, 1)) MB)"
