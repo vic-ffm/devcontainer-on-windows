@@ -97,7 +97,6 @@ $script:EXIT_WINGET_FAILED = 6
 $script:EXIT_REBOOT_REQUIRED = 7
 $script:EXIT_USER_CANCELLED = 8
 $script:EXIT_NO_SLOT_AVAILABLE = 9
-$script:EXIT_DEBIAN_EXISTS = 10
 
 # Supported distros
 $script:SUPPORTED_DISTROS = @{
@@ -468,6 +467,98 @@ function Invoke-WslWithTimeout {
         Output   = $stdout
         Error    = $stderr
         Success  = ($process.ExitCode -eq 0)
+    }
+}
+
+#-------------------------------------------------------------------------------
+# Debian Rootfs Download
+#-------------------------------------------------------------------------------
+function Get-DebianRootfs {
+    <#
+    .SYNOPSIS
+    Downloads and extracts the Debian rootfs tarball from Microsoft's .appx package.
+    .OUTPUTS
+    Returns the path to the extracted rootfs.tar file.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
+        Justification = 'Rootfs is singular - abbreviation for root filesystem')]
+    param(
+        [Parameter(Mandatory)]
+        [string]$OutputPath
+    )
+
+    $appxUrl = "https://aka.ms/wsl-debian-gnulinux"
+    $randomSuffix = Get-Random -Maximum 999999
+
+    # Use LOCALAPPDATA for temp files - guaranteed to be on local system drive
+    $tempBase = Join-Path $env:LOCALAPPDATA "DevContainersSetup\temp"
+    if (-not (Test-Path $tempBase)) {
+        New-Item -ItemType Directory -Path $tempBase -Force | Out-Null
+    }
+
+    $appxPath = Join-Path $tempBase "debian-appx-$randomSuffix.zip"
+    $extractPath = Join-Path $tempBase "debian-extract-$randomSuffix"
+
+    try {
+        Write-LogInfo "Downloading Debian rootfs from Microsoft..."
+        Write-LogDebug "URL: $appxUrl"
+
+        $downloadStart = Get-Date
+        Invoke-WebRequest -Uri $appxUrl -OutFile $appxPath -UseBasicParsing -ErrorAction Stop
+        $downloadTime = (Get-Date) - $downloadStart
+        $appxSize = (Get-Item $appxPath).Length
+        Write-LogDebug "Downloaded $([Math]::Round($appxSize / 1MB, 1)) MB in $([Math]::Round($downloadTime.TotalSeconds, 1))s"
+
+        Write-LogInfo "Extracting rootfs from package..."
+        Expand-Archive -Path $appxPath -DestinationPath $extractPath -Force -ErrorAction Stop
+
+        # Find the rootfs tarball (install.tar.gz in Debian's .appx)
+        $rootfsGz = Get-ChildItem -Path $extractPath -Filter "install.tar.gz" -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+        if (-not $rootfsGz) {
+            $rootfsGz = Get-ChildItem -Path $extractPath -Filter "*.tar.gz" -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+        }
+
+        if (-not $rootfsGz) {
+            throw "No rootfs tarball found in .appx package. Contents: $(Get-ChildItem $extractPath -Recurse -Name | Out-String)"
+        }
+
+        Write-LogDebug "Found rootfs: $($rootfsGz.Name) ($([Math]::Round($rootfsGz.Length / 1MB, 1)) MB)"
+
+        # Decompress .tar.gz to .tar using .NET GzipStream
+        Write-LogInfo "Decompressing rootfs..."
+        $gzipInput = [System.IO.File]::OpenRead($rootfsGz.FullName)
+        $gzipStream = New-Object System.IO.Compression.GzipStream($gzipInput, [System.IO.Compression.CompressionMode]::Decompress)
+        $tarOutput = [System.IO.File]::Create($OutputPath)
+
+        try {
+            $gzipStream.CopyTo($tarOutput)
+        }
+        finally {
+            $tarOutput.Close()
+            $gzipStream.Close()
+            $gzipInput.Close()
+        }
+
+        if (-not (Test-Path $OutputPath)) {
+            throw "Failed to create rootfs tarball at: $OutputPath"
+        }
+
+        $tarSize = (Get-Item $OutputPath).Length
+        Write-LogDebug "Decompressed rootfs: $([Math]::Round($tarSize / 1MB, 1)) MB"
+
+        if ($tarSize -lt 100MB) {
+            throw "Rootfs tarball suspiciously small ($([Math]::Round($tarSize / 1MB, 1)) MB)"
+        }
+
+        Write-LogSuccess "Debian rootfs ready ($([Math]::Round($tarSize / 1MB, 0)) MB)"
+        return $OutputPath
+    }
+    finally {
+        Remove-Item $appxPath -Force -ErrorAction SilentlyContinue
+        Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -931,41 +1022,16 @@ function Get-NextAvailableDistroName {
     }
 }
 
-function Test-BaseDebianPresent {
+function Install-WslDistroViaImport {
     <#
     .SYNOPSIS
-    Checks if a distro named 'Debian' (exactly) exists.
+    Creates a new Debian WSL distribution by downloading rootfs directly from Microsoft.
+    .DESCRIPTION
+    Downloads the Debian .appx package from Microsoft, extracts the rootfs tarball,
+    and imports it as a new WSL distribution with the specified name.
     .OUTPUTS
-    Returns $true if 'Debian' exists, $false otherwise.
+    Returns the name of the created distribution.
     #>
-
-    try {
-        $rawOutput = wsl --list --quiet 2>&1
-        $distroList = ($rawOutput | Out-String) -replace '\x00', '' -replace '\r', ''
-
-        # Handle WSL command failure - assume Debian doesn't exist (safer to check again later)
-        if ($LASTEXITCODE -ne 0) {
-            Write-LogDebug "wsl --list failed in Test-BaseDebianPresent, assuming Debian doesn't exist"
-            return $false
-        }
-
-        $existingDistros = @($distroList -split "`n" |
-            Where-Object { $_ -match '\S' } |
-            ForEach-Object { $_.Trim() })
-
-        $debianExists = $existingDistros | Where-Object {
-            $_.Equals("Debian", [StringComparison]::OrdinalIgnoreCase)
-        }
-
-        return ($null -ne $debianExists)
-    }
-    catch {
-        Write-LogDebug "Error checking for Debian: $_"
-        return $false
-    }
-}
-
-function Install-WslDistroViaImport {
     param(
         [Parameter(Mandatory)]
         [string]$TargetDistroName
@@ -976,172 +1042,48 @@ function Install-WslDistroViaImport {
 
     Write-LogInfo "Creating $displayName as '$TargetDistroName'..."
 
-    # CRITICAL SAFETY CHECK: Ensure no existing "Debian" distro
-    if (Test-BaseDebianPresent) {
-        Write-LogError "A distro named 'Debian' already exists."
-        Write-LogError "This script needs to temporarily use that name during installation."
-        Write-LogError ""
-        Write-LogError "Options:"
-        Write-LogError "  1. Backup and remove your existing Debian:"
-        Write-LogError "       wsl --export Debian C:\backup\debian.tar"
-        Write-LogError "       wsl --unregister Debian"
-        Write-LogError "  2. Rename it by export/import with a new name"
-        Write-LogError ""
-        Exit-WithError "Cannot proceed while 'Debian' distro exists" $script:EXIT_DEBIAN_EXISTS
-    }
-
     if ($DryRun) {
-        Write-LogInfo "[DRY-RUN] Would create $TargetDistroName via export/import method"
+        Write-LogInfo "[DRY-RUN] Would download Debian rootfs and import as $TargetDistroName"
         return $TargetDistroName
     }
 
-    # Generate random suffix for temp resources (matches shell scripts' SRANDOM pattern)
-    $randomSuffix = Get-Random -Maximum 999999
-    $tempTarballPath = Join-Path $env:TEMP "debian-rootfs-$randomSuffix.tar"
-
-    # Validate temp path is on local drive (required for WSL operations)
-    # UNC paths like \\server\share won't work
-    if ($tempTarballPath -notmatch '^[A-Za-z]:\\') {
-        $tempTarballPath = Join-Path $env:SystemDrive "Temp\debian-rootfs-$randomSuffix.tar"
-        Write-LogWarn "TEMP is not on local drive, using: $tempTarballPath"
-        # Ensure parent directory exists
-        $parentDir = Split-Path $tempTarballPath -Parent
-        if (-not (Test-Path $parentDir)) {
-            New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
-        }
+    # Use LOCALAPPDATA for temp files - guaranteed to be on local system drive
+    $tempBase = Join-Path $env:LOCALAPPDATA "DevContainersSetup\temp"
+    if (-not (Test-Path $tempBase)) {
+        New-Item -ItemType Directory -Path $tempBase -Force | Out-Null
     }
 
-    # Install location for imported distro
+    $randomSuffix = Get-Random -Maximum 999999
+    $tempTarPath = Join-Path $tempBase "debian-rootfs-$randomSuffix.tar"
     $installPath = Join-Path $env:LOCALAPPDATA "WSL\$TargetDistroName"
 
-    # Check if install path already exists (from failed previous run)
     if (Test-Path $installPath) {
         $existingFiles = Get-ChildItem $installPath -ErrorAction SilentlyContinue
         if ($existingFiles) {
             Write-LogError "Install path already contains data: $installPath"
             Write-LogError "This may be from a failed previous run."
-            Write-LogError "Please remove it manually if safe: Remove-Item -Recurse '$installPath'"
+            Write-LogError "Please remove it manually: Remove-Item -Recurse '$installPath'"
             Exit-WithError "Install path not empty: $installPath" $script:EXIT_DISTRO_FAILED
         }
     }
 
-    # Cleanup tracking flags (for LIFO rollback on failure)
-    $cleanupTempDistro = $false
     $cleanupTarball = $false
-    $cleanupTargetDistro = $false
     $cleanupInstallPath = $false
+    $cleanupDistro = $false
 
     try {
-        # Step 1: Install temporary base Debian
-        Write-LogInfo "Step 1/5: Installing temporary base Debian..."
-
-        $output = wsl --install -d Debian --no-launch 2>&1
-        $exitCode = $LASTEXITCODE
-        $outputStr = ($output | Out-String) -replace '\x00', '' -replace '\r', ''
-
-        Write-LogDebug "wsl --install exit code: $exitCode"
-
-        if ($exitCode -ne 0 -or $outputStr -match "Sparse|VHD|corruption") {
-            Write-LogWarn "wsl --install failed (exit=$exitCode), trying winget..."
-
-            wsl --shutdown 2>$null
-            Start-Sleep -Seconds 3
-
-            $wingetOutput = winget install --id Debian.Debian --source msstore `
-                --accept-source-agreements --accept-package-agreements `
-                --disable-interactivity 2>&1
-            $wingetExitCode = $LASTEXITCODE
-            $wingetStr = ($wingetOutput | Out-String)
-
-            if ($wingetExitCode -ne 0 -and $wingetStr -notmatch "successfully installed|already installed") {
-                throw "Failed to install base Debian: wsl exit=$exitCode, winget exit=$wingetExitCode"
-            }
-        }
-
-        # Wait for installation to settle
-        Start-Sleep -Seconds 5
-
-        # Verify base Debian exists
-        if (-not (Test-BaseDebianPresent)) {
-            throw "Base Debian distro not found after installation"
-        }
-
-        $cleanupTempDistro = $true
-        Write-LogSuccess "Base Debian installed"
-
-        # Step 2: Export rootfs to tarball (with timeout protection)
-        Write-LogInfo "Step 2/5: Exporting rootfs to tarball..."
-        Write-LogDebug "Tarball path: $tempTarballPath"
-
-        # Use timeout wrapper for export (can take time for large distros)
-        $exportTimeout = 300  # 5 minutes should be plenty for base Debian
-        $exportPsi = New-Object System.Diagnostics.ProcessStartInfo
-        $exportPsi.FileName = "wsl.exe"
-        # Quote the tarball path to handle spaces in username paths
-        $exportPsi.Arguments = "--export Debian `"$tempTarballPath`""
-        $exportPsi.RedirectStandardOutput = $true
-        $exportPsi.RedirectStandardError = $true
-        $exportPsi.UseShellExecute = $false
-        $exportPsi.CreateNoWindow = $true
-
-        $exportProcess = [System.Diagnostics.Process]::Start($exportPsi)
-
-        if (-not $exportProcess.WaitForExit($exportTimeout * 1000)) {
-            $exportProcess.Kill()
-            throw "Export timed out after $exportTimeout seconds"
-        }
-
-        if ($exportProcess.ExitCode -ne 0) {
-            $exportError = $exportProcess.StandardError.ReadToEnd()
-            throw "Export failed (exit code: $($exportProcess.ExitCode)): $exportError"
-        }
-
+        Write-LogInfo "Step 1/3: Downloading Debian rootfs..."
+        $tempTarPath = Get-DebianRootfs -OutputPath $tempTarPath
         $cleanupTarball = $true
 
-        # Verify tarball exists and has reasonable size
-        if (-not (Test-Path $tempTarballPath)) {
-            throw "Export tarball not found: $tempTarballPath"
-        }
-
-        $tarballSize = (Get-Item $tempTarballPath).Length
-        Write-LogDebug "Tarball size: $([Math]::Round($tarballSize / 1MB, 2)) MB"
-
-        # Base Debian rootfs should be at least 200MB; 50MB is suspiciously small
-        if ($tarballSize -lt 50MB) {
-            throw "Tarball suspiciously small ($([Math]::Round($tarballSize / 1MB, 2)) MB) - export may have failed"
-        }
-
-        Write-LogSuccess "Rootfs exported ($([Math]::Round($tarballSize / 1MB, 0)) MB)"
-
-        # Step 3: Unregister the temporary base Debian
-        Write-LogInfo "Step 3/5: Cleaning up temporary base distro..."
-
-        $null = wsl --unregister Debian 2>&1
-        $unregExitCode = $LASTEXITCODE
-
-        if ($unregExitCode -ne 0) {
-            Write-LogWarn "Unregister returned exit code $unregExitCode (may be OK)"
-        }
-
-        $cleanupTempDistro = $false  # Successfully removed
-        Write-LogSuccess "Temporary base distro removed"
-
-        # Step 4: Import as target name
-        Write-LogInfo "Step 4/5: Importing as $TargetDistroName..."
+        Write-LogInfo "Step 2/3: Importing as $TargetDistroName..."
 
         if (-not (Test-Path $installPath)) {
             New-Item -ItemType Directory -Path $installPath -Force | Out-Null
             $cleanupInstallPath = $true
         }
 
-        # Use splatting for proper argument handling with paths containing spaces
-        $importArgs = @(
-            "--import"
-            $TargetDistroName
-            "`"$installPath`""
-            "`"$tempTarballPath`""
-        )
-        $importOutput = & wsl.exe @importArgs 2>&1
+        $importOutput = wsl --import $TargetDistroName "`"$installPath`"" "`"$tempTarPath`"" 2>&1
         $importExitCode = $LASTEXITCODE
         $importStr = ($importOutput | Out-String) -replace '\x00', ''
 
@@ -1149,38 +1091,31 @@ function Install-WslDistroViaImport {
             throw "Import failed (exit code: $importExitCode): $importStr"
         }
 
-        $cleanupTargetDistro = $true
-        $cleanupInstallPath = $false  # Now owned by WSL
+        $cleanupDistro = $true
+        $cleanupInstallPath = $false
         Write-LogSuccess "$TargetDistroName imported"
 
-        # Step 5: Clean up tarball
-        Write-LogInfo "Step 5/5: Cleaning up tarball..."
-
-        Remove-Item $tempTarballPath -Force -ErrorAction SilentlyContinue
+        Write-LogInfo "Step 3/3: Cleaning up..."
+        Remove-Item $tempTarPath -Force -ErrorAction SilentlyContinue
         $cleanupTarball = $false
 
-        Write-LogSuccess "Tarball removed"
-
-        # Verify the imported distro is usable
         Write-LogInfo "Verifying $TargetDistroName..."
         $verifyResult = wsl -d $TargetDistroName -u root --cd /tmp -- echo "health_check" 2>&1
         $verifyStr = ($verifyResult | Out-String) -replace '\x00', ''
 
         if ($LASTEXITCODE -ne 0) {
-            throw "Imported distro health check failed: $verifyStr"
+            throw "Distro health check failed: $verifyStr"
         }
 
         Write-LogSuccess "$displayName created as '$TargetDistroName'"
-        $cleanupTargetDistro = $false  # Success - don't cleanup
+        $cleanupDistro = $false
 
         return $TargetDistroName
     }
     catch {
         Write-LogError "Failed to create distro: $_"
 
-        # LIFO Cleanup on failure (reverse order of creation)
-
-        if ($cleanupTargetDistro) {
+        if ($cleanupDistro) {
             Write-LogInfo "Rolling back: removing $TargetDistroName..."
             $null = wsl --unregister $TargetDistroName 2>&1
         }
@@ -1190,14 +1125,9 @@ function Install-WslDistroViaImport {
             Remove-Item -Path $installPath -Recurse -Force -ErrorAction SilentlyContinue
         }
 
-        if ($cleanupTarball -and (Test-Path $tempTarballPath)) {
+        if ($cleanupTarball -and (Test-Path $tempTarPath)) {
             Write-LogInfo "Rolling back: removing tarball..."
-            Remove-Item $tempTarballPath -Force -ErrorAction SilentlyContinue
-        }
-
-        if ($cleanupTempDistro) {
-            Write-LogInfo "Rolling back: removing temporary Debian..."
-            $null = wsl --unregister Debian 2>&1
+            Remove-Item $tempTarPath -Force -ErrorAction SilentlyContinue
         }
 
         Exit-WithError "Failed to create $TargetDistroName`: $_" $script:EXIT_DISTRO_FAILED
@@ -1304,14 +1234,9 @@ function Initialize-WslDistro {
         # Copy scripts to WSL via Windows filesystem
         Write-LogInfo "Copying setup scripts to WSL..."
 
-        $tempDir = Join-Path $env:TEMP "wsl-devcontainers-$(Get-Random)"
-
-        # Validate local drive (required for WSL path conversion)
-        # UNC paths like \\server\share won't work with WSL /mnt/ mapping
-        if ($tempDir -notmatch '^[A-Za-z]:\\') {
-            $tempDir = Join-Path $env:SystemDrive "Temp\wsl-devcontainers-$(Get-Random)"
-            Write-LogWarn "TEMP is not on local drive, using: $tempDir"
-        }
+        # Use LOCALAPPDATA for temp files - guaranteed to be on local system drive
+        # and accessible via WSL's /mnt/c/... path mapping
+        $tempDir = Join-Path $env:LOCALAPPDATA "DevContainersSetup\temp\wsl-scripts-$(Get-Random)"
 
         New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
