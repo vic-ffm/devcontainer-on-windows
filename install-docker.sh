@@ -10,7 +10,7 @@
 #
 # REQUIREMENTS:
 #   Bash 5.2+
-#   Debian 13 Trixie (or Debian 12+) in WSL2
+#   Debian 13 Trixie in WSL2
 #
 # USAGE:
 #   curl -fsSL https://example.com/install-docker-wsl2.sh | sudo bash
@@ -2107,7 +2107,7 @@ ${COLORS[bold]}GENERAL OPTIONS:${COLORS[reset]}
     --help, -h         Show this help
 
 ${COLORS[bold]}SUPPORTED:${COLORS[reset]}
-    Debian (any version) - auto-detects, falls back if needed
+    Debian-based distributions (Ubuntu, Debian) - auto-detects codename
 
 ${COLORS[bold]}EXAMPLES:${COLORS[reset]}
     # Install Docker

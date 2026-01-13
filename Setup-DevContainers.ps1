@@ -492,9 +492,15 @@ function Test-WslFileTransferIntegrity {
 function Get-DebianRootfs {
     <#
     .SYNOPSIS
-    Downloads and extracts the Debian rootfs tarball from Microsoft's .appx package.
+    Downloads Debian 13 Trixie rootfs from official WSL distribution.
+    .DESCRIPTION
+    Downloads the architecture-specific .wsl file from salsa.debian.org,
+    verifies the SHA256 checksum, and returns the path to the tarball.
+    The .wsl format is a direct tarball ready for wsl --import.
     .OUTPUTS
-    Returns the path to the extracted rootfs.tar file.
+    Returns the path to the downloaded .wsl tarball file.
+    .LINK
+    https://github.com/microsoft/WSL/blob/master/distributions/DistributionInfo.json
     #>
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
         Justification = 'Rootfs is singular - abbreviation for root filesystem')]
@@ -503,114 +509,62 @@ function Get-DebianRootfs {
         [string]$OutputPath
     )
 
-    $appxUrl = "https://aka.ms/wsl-debian-gnulinux"
-    $randomSuffix = Get-Random -Maximum 999999
-
-    # Use LOCALAPPDATA for temp files - guaranteed to be on local system drive
-    $tempBase = Join-Path $env:LOCALAPPDATA "DevContainersSetup\temp"
-    if (-not (Test-Path $tempBase)) {
-        New-Item -ItemType Directory -Path $tempBase -Force | Out-Null
+    # Architecture-specific URLs and checksums from Microsoft WSL distribution catalog
+    $debianUrls = @{
+        'x64' = @{
+            Url = 'https://salsa.debian.org/debian/WSL/-/jobs/7949331/artifacts/raw/Debian_WSL_AMD64_v1.22.0.0.wsl'
+            SHA256 = '543123ccc5f838e63dac81634fb0223dc8dcaa78fdb981387d625feb1ed168c7'
+        }
+        'ARM64' = @{
+            Url = 'https://salsa.debian.org/debian/WSL/-/jobs/7949331/artifacts/raw/Debian_WSL_ARM64_v1.22.0.0.wsl'
+            SHA256 = '5701f1add55f8cf3b56528109a6220ae5c89f2189d7ae97b9a4b5302b80e967c'
+        }
     }
 
-    $appxPath = Join-Path $tempBase "debian-appx-$randomSuffix.zip"
-    $extractPath = Join-Path $tempBase "debian-extract-$randomSuffix"
+    $systemArch = Get-SystemArchitecture
+    Write-LogDebug "System architecture: $systemArch"
+
+    if (-not $debianUrls.ContainsKey($systemArch)) {
+        throw "Unsupported architecture: $systemArch. Supported: x64, ARM64"
+    }
+
+    $archInfo = $debianUrls[$systemArch]
+    $downloadUrl = $archInfo.Url
+    $expectedHash = $archInfo.SHA256
+
+    Write-LogInfo "Downloading Debian 13 Trixie ($systemArch)..."
+    Write-LogDebug "URL: $downloadUrl"
 
     try {
-        Write-LogInfo "Downloading Debian rootfs from Microsoft..."
-        Write-LogDebug "URL: $appxUrl"
-
         $downloadStart = Get-Date
-        Invoke-WebRequest -Uri $appxUrl -OutFile $appxPath -UseBasicParsing -ErrorAction Stop
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $OutputPath -UseBasicParsing -ErrorAction Stop
         $downloadTime = (Get-Date) - $downloadStart
-        $appxSize = (Get-Item $appxPath).Length
-        Write-LogDebug "Downloaded $([Math]::Round($appxSize / 1MB, 1)) MB in $([Math]::Round($downloadTime.TotalSeconds, 1))s"
+        $fileSize = (Get-Item $OutputPath).Length
+        Write-LogDebug "Downloaded $([Math]::Round($fileSize / 1MB, 1)) MB in $([Math]::Round($downloadTime.TotalSeconds, 1))s"
 
-        Write-LogInfo "Extracting rootfs from package..."
-        Expand-Archive -Path $appxPath -DestinationPath $extractPath -Force -ErrorAction Stop
+        # Verify SHA256 checksum
+        Write-LogInfo "Verifying SHA256 checksum..."
+        $actualHash = (Get-FileHash -Path $OutputPath -Algorithm SHA256).Hash.ToLower()
 
-        # Check if this is an appxbundle (contains nested .appx files for different architectures)
-        $nestedAppx = Get-ChildItem -Path $extractPath -Filter "*.appx" -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notmatch 'scale-\d+' }  # Exclude display scaling variants
+        if ($actualHash -ne $expectedHash.ToLower()) {
+            throw "SHA256 checksum mismatch!`nExpected: $expectedHash`nActual:   $actualHash"
+        }
+        Write-LogSuccess "Checksum verified"
 
-        if ($nestedAppx) {
-            # This is an appxbundle - need to extract the architecture-specific appx first
-            Write-LogInfo "Detected appxbundle structure, extracting architecture-specific package..."
-
-            $systemArch = Get-SystemArchitecture
-            Write-LogDebug "System architecture: $systemArch"
-
-            # Find the matching architecture appx (case-insensitive match)
-            $archAppx = $nestedAppx | Where-Object { $_.Name -match "_$systemArch\.appx$" } | Select-Object -First 1
-
-            if (-not $archAppx) {
-                # Fallback: try to find any x64 or ARM64 appx
-                $archAppx = $nestedAppx | Where-Object { $_.Name -match '_(x64|ARM64)\.appx$' } | Select-Object -First 1
-                if ($archAppx) {
-                    Write-LogWarn "Using fallback appx: $($archAppx.Name)"
-                }
-            }
-
-            if (-not $archAppx) {
-                throw "No architecture-specific appx found for $systemArch. Available packages: $($nestedAppx.Name -join ', ')"
-            }
-
-            Write-LogDebug "Extracting inner package: $($archAppx.Name)"
-
-            # Extract the inner appx to get the actual rootfs
-            $innerExtractPath = Join-Path $extractPath "inner-appx"
-            Expand-Archive -Path $archAppx.FullName -DestinationPath $innerExtractPath -Force -ErrorAction Stop
-
-            # Update search path to look inside the inner extraction
-            $extractPath = $innerExtractPath
+        # Verify file size is reasonable (minimal rootfs can be as small as ~10MB)
+        if ($fileSize -lt 10MB) {
+            throw "Rootfs file suspiciously small ($([Math]::Round($fileSize / 1MB, 1)) MB)"
         }
 
-        # Find the rootfs tarball (install.tar.gz in Debian's .appx)
-        $rootfsGz = Get-ChildItem -Path $extractPath -Filter "install.tar.gz" -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-
-        if (-not $rootfsGz) {
-            $rootfsGz = Get-ChildItem -Path $extractPath -Filter "*.tar.gz" -Recurse -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-        }
-
-        if (-not $rootfsGz) {
-            throw "No rootfs tarball found in package. Contents: $(Get-ChildItem $extractPath -Recurse -Name | Out-String)"
-        }
-
-        Write-LogDebug "Found rootfs: $($rootfsGz.Name) ($([Math]::Round($rootfsGz.Length / 1MB, 1)) MB)"
-
-        # Decompress .tar.gz to .tar using .NET GzipStream
-        Write-LogInfo "Decompressing rootfs..."
-        $gzipInput = [System.IO.File]::OpenRead($rootfsGz.FullName)
-        $gzipStream = New-Object System.IO.Compression.GzipStream($gzipInput, [System.IO.Compression.CompressionMode]::Decompress)
-        $tarOutput = [System.IO.File]::Create($OutputPath)
-
-        try {
-            $gzipStream.CopyTo($tarOutput)
-        }
-        finally {
-            $tarOutput.Close()
-            $gzipStream.Close()
-            $gzipInput.Close()
-        }
-
-        if (-not (Test-Path $OutputPath)) {
-            throw "Failed to create rootfs tarball at: $OutputPath"
-        }
-
-        $tarSize = (Get-Item $OutputPath).Length
-        Write-LogDebug "Decompressed rootfs: $([Math]::Round($tarSize / 1MB, 1)) MB"
-
-        if ($tarSize -lt 100MB) {
-            throw "Rootfs tarball suspiciously small ($([Math]::Round($tarSize / 1MB, 1)) MB)"
-        }
-
-        Write-LogSuccess "Debian rootfs ready ($([Math]::Round($tarSize / 1MB, 0)) MB)"
+        Write-LogSuccess "Debian 13 Trixie rootfs ready ($([Math]::Round($fileSize / 1MB, 0)) MB)"
         return $OutputPath
     }
-    finally {
-        Remove-Item $appxPath -Force -ErrorAction SilentlyContinue
-        Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+    catch {
+        if (Test-Path $OutputPath) {
+            Remove-Item $OutputPath -Force -ErrorAction SilentlyContinue
+        }
+        throw
     }
 }
 
@@ -1134,9 +1088,9 @@ function Get-NextAvailableDistroName {
 function Install-WslDistroViaImport {
     <#
     .SYNOPSIS
-    Creates a new Debian WSL distribution by downloading rootfs directly from Microsoft.
+    Creates a new Debian WSL distribution by downloading rootfs from official source.
     .DESCRIPTION
-    Downloads the Debian .appx package from Microsoft, extracts the rootfs tarball,
+    Downloads the Debian .wsl tarball, verifies the checksum,
     and imports it as a new WSL distribution with the specified name.
     .OUTPUTS
     Returns the name of the created distribution.
@@ -1163,7 +1117,7 @@ function Install-WslDistroViaImport {
     }
 
     $randomSuffix = Get-Random -Maximum 999999
-    $tempTarPath = Join-Path $tempBase "debian-rootfs-$randomSuffix.tar"
+    $tempTarPath = Join-Path $tempBase "debian-rootfs-$randomSuffix.wsl"
     $installPath = Join-Path $env:LOCALAPPDATA "WSL\$TargetDistroName"
 
     if (Test-Path $installPath) {
@@ -2079,7 +2033,7 @@ OPTIONS:
     -Help              Show this help message
 
 SUPPORTED DISTRIBUTIONS:
-    Debian    Debian 13 Trixie - support until 2030
+    Debian    Debian 13 Trixie
 
 EXAMPLES:
     # Standard setup with Debian

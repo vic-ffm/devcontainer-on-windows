@@ -106,9 +106,9 @@ code --install-extension ms-vscode-remote.remote-wsl
 
 ## Supported Distributions
 
-| Distribution | Version | Support Until |
-|--------------|---------|---------------|
-| Debian | 13 Trixie | June 2030 |
+| Distribution | Version |
+|--------------|---------|
+| Debian | 13 Trixie |
 
 ## Options
 

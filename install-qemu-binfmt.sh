@@ -12,7 +12,7 @@
 #
 # REQUIREMENTS:
 #   Bash 5.2+
-#   Debian 13 Trixie (or Debian 12+) in WSL2
+#   Debian 13 Trixie in WSL2
 #   Docker Engine installed and running (for steps 2-4)
 #
 # USAGE:
@@ -1071,7 +1071,7 @@ ${COLORS[bold]}WHAT THIS ENABLES:${COLORS[reset]}
 
 ${COLORS[bold]}REQUIREMENTS:${COLORS[reset]}
     - Bash 5.2+
-    - Debian 13 Trixie (or Debian 12+) in WSL2
+    - Debian 13 Trixie in WSL2
     - Docker Engine installed (install-docker.sh)
 
 ${COLORS[bold]}ENVIRONMENT:${COLORS[reset]}

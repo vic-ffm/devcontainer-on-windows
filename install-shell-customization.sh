@@ -8,7 +8,7 @@
 #
 # REQUIREMENTS:
 #   Bash 5.2+
-#   Debian 13 Trixie (or Debian 12+) in WSL2
+#   Debian 13 Trixie in WSL2
 #
 # USAGE:
 #   sudo ./install-shell-customization.sh
