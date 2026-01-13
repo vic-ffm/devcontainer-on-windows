@@ -90,21 +90,16 @@ $script:SetupMutex = $null
 $script:EXIT_SUCCESS = 0
 $script:EXIT_GENERAL_ERROR = 1
 $script:EXIT_NOT_ADMIN = 2
-$script:EXIT_INVALID_ARGS = 3
 $script:EXIT_WSL_FAILED = 4
 $script:EXIT_DISTRO_FAILED = 5
 $script:EXIT_WINGET_FAILED = 6
 $script:EXIT_REBOOT_REQUIRED = 7
-$script:EXIT_USER_CANCELLED = 8
 $script:EXIT_NO_SLOT_AVAILABLE = 9
 
 # Supported distros
 $script:SUPPORTED_DISTROS = @{
     'Debian' = @{
-        WslName      = 'Debian'
-        DisplayName  = 'Debian 13 Trixie'
-        IsDefault    = $true
-        SupportUntil = '2030-06-30'
+        DisplayName = 'Debian 13 Trixie'
     }
 }
 
@@ -264,6 +259,19 @@ function Get-Confirmation {
     return $response -match '^[Yy]'
 }
 
+function Get-PosixEscapedPath {
+    <#
+    .SYNOPSIS
+    Escapes a path for use in POSIX single-quoted strings.
+    .DESCRIPTION
+    Replaces single quotes with the POSIX-safe sequence: '\''
+    This closes the quote, adds an escaped quote, reopens the quote.
+    Required when Windows usernames contain apostrophes (e.g., O'Connor).
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    return $Path -replace "'", "'\\''"
+}
+
 #-------------------------------------------------------------------------------
 # Script Locking
 #-------------------------------------------------------------------------------
@@ -384,92 +392,6 @@ function Test-VirtualizationEnabled {
 #-------------------------------------------------------------------------------
 # WSL Command Helpers
 #-------------------------------------------------------------------------------
-function Invoke-WslCommand {
-    <#
-    .SYNOPSIS
-    Executes a WSL command with proper UTF-16 encoding handling.
-    .OUTPUTS
-    Returns hashtable with ExitCode, Output, and Success properties.
-    #>
-    param(
-        [Parameter(Mandatory)]
-        [string[]]$Arguments,
-        [string]$Distro
-    )
-
-    $origEncoding = [Console]::OutputEncoding
-    try {
-        [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
-
-        $wslArgs = @()
-        if ($Distro) {
-            $wslArgs += @("-d", $Distro)
-        }
-        $wslArgs += $Arguments
-
-        $output = & wsl.exe @wslArgs 2>&1
-        $exitCode = $LASTEXITCODE
-
-        return @{
-            ExitCode = $exitCode
-            Output   = ($output | Out-String) -replace '\x00', '' -replace '\r', ''
-            Success  = ($exitCode -eq 0)
-        }
-    }
-    finally {
-        [Console]::OutputEncoding = $origEncoding
-    }
-}
-
-function Invoke-WslWithTimeout {
-    <#
-    .SYNOPSIS
-    Executes a WSL command with timeout protection for long-running commands.
-    .OUTPUTS
-    Returns hashtable with ExitCode, Output, Error, and Success properties.
-    #>
-    param(
-        [Parameter(Mandatory)]
-        [string[]]$Arguments,
-        [string]$Distro,
-        [int]$TimeoutSeconds = 120
-    )
-
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = "wsl.exe"
-
-    $fullArgs = @()
-    if ($Distro) {
-        $fullArgs += @("-d", $Distro)
-    }
-    $fullArgs += $Arguments
-    $psi.Arguments = $fullArgs -join ' '
-
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $psi.StandardOutputEncoding = [System.Text.Encoding]::Unicode
-    $psi.StandardErrorEncoding = [System.Text.Encoding]::Unicode
-
-    $process = [System.Diagnostics.Process]::Start($psi)
-
-    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-        $process.Kill()
-        throw "WSL command timed out after $TimeoutSeconds seconds: wsl $($fullArgs -join ' ')"
-    }
-
-    $stdout = $process.StandardOutput.ReadToEnd() -replace '\x00', '' -replace '\r', ''
-    $stderr = $process.StandardError.ReadToEnd() -replace '\x00', '' -replace '\r', ''
-
-    return @{
-        ExitCode = $process.ExitCode
-        Output   = $stdout
-        Error    = $stderr
-        Success  = ($process.ExitCode -eq 0)
-    }
-}
-
 function Test-WslFileTransferIntegrity {
     <#
     .SYNOPSIS
@@ -806,18 +728,34 @@ function Initialize-WslConfig {
         return
     }
 
+    # Helper function to extract section content (for scoped matching)
+    # Matches from [section] until next [section] or end of file
+    $getSectionContent = {
+        param([string]$Content, [string]$SectionName)
+        $pattern = "\[$SectionName\][\s\S]*?(?=\n\[|\z)"
+        $match = [regex]::Match($Content, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($match.Success) { return $match.Value } else { return "" }
+    }
+
+    # Extract section contents for scoped matching
+    $wsl2Section = & $getSectionContent $configContent "wsl2"
+    $experimentalSection = & $getSectionContent $configContent "experimental"
+
     # Ensure [wsl2] section exists with recommended settings
     if ($configContent -notmatch "\[wsl2\]") {
         $configContent = "[wsl2]`nmemory=$memoryConfig`nlocalhostForwarding=true`n`n" + $configContent
         $configChanged = $true
         Write-LogDebug "Added [wsl2] section with memory=$memoryConfig"
     }
-    elseif ($configContent -notmatch "memory\s*=") {
-        # Add memory setting under existing [wsl2] section
+    elseif ($wsl2Section -notmatch "(?m)^memory\s*=") {
+        # Add memory setting under existing [wsl2] section (only if not in that section)
         $configContent = $configContent -replace "(\[wsl2\])", "`$1`nmemory=$memoryConfig"
         $configChanged = $true
         Write-LogDebug "Added memory=$memoryConfig to existing [wsl2] section"
     }
+
+    # Re-extract experimental section after potential changes
+    $experimentalSection = & $getSectionContent $configContent "experimental"
 
     # DISABLE sparse VHD due to current WSL2 bugs
     if ($configContent -notmatch "\[experimental\]") {
@@ -825,19 +763,22 @@ function Initialize-WslConfig {
         $configChanged = $true
         Write-LogDebug "Added [experimental] section with sparseVhd=false"
     }
-    elseif ($configContent -match "sparseVhd\s*=\s*true") {
+    elseif ($experimentalSection -match "(?m)^sparseVhd\s*=\s*true") {
         $configContent = $configContent -replace "sparseVhd\s*=\s*true", "sparseVhd=false"
         $configChanged = $true
         Write-LogDebug "Changed sparseVhd from true to false"
     }
-    elseif ($configContent -notmatch "sparseVhd\s*=") {
+    elseif ($experimentalSection -notmatch "(?m)^sparseVhd\s*=") {
         $configContent = $configContent -replace "(\[experimental\])", "`$1`nsparseVhd=false"
         $configChanged = $true
         Write-LogDebug "Added sparseVhd=false to existing [experimental] section"
     }
 
+    # Re-extract experimental section after potential changes
+    $experimentalSection = & $getSectionContent $configContent "experimental"
+
     # Ensure autoMemoryReclaim is configured (separate from sparseVhd logic)
-    if ($configContent -match "\[experimental\]" -and $configContent -notmatch "autoMemoryReclaim\s*=") {
+    if ($configContent -match "\[experimental\]" -and $experimentalSection -notmatch "(?m)^autoMemoryReclaim\s*=") {
         $configContent = $configContent -replace "(\[experimental\])", "`$1`nautoMemoryReclaim=gradual"
         $configChanged = $true
         Write-LogDebug "Added autoMemoryReclaim=gradual to existing [experimental] section"
@@ -1071,49 +1012,6 @@ function Enable-WSL2Feature {
 
     Write-LogSuccess "WSL2 features configured"
     return $false
-}
-
-function Get-ExistingDistro {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive CLI requires colored console output')]
-    param()
-
-    Write-LogStep "2/7" "Checking existing WSL distributions"
-
-    try {
-        # WSL outputs UTF-16LE which PowerShell may not handle well
-        # Use Out-String to convert then clean up
-        $rawOutput = wsl --list --verbose 2>&1
-        $output = ($rawOutput | Out-String) -replace '\x00', '' -replace '\r', ''
-
-        if ($LASTEXITCODE -ne 0 -or $output -match "no installed distributions") {
-            Write-LogInfo "No WSL distributions found"
-            return @()
-        }
-
-        # Parse the output (skip header line), trim whitespace
-        $lines = @($output -split "`n" |
-            Select-Object -Skip 1 |
-            Where-Object { $_ -match '\S' } |
-            ForEach-Object { $_.Trim() })
-
-        if ($lines.Count -eq 0) {
-            Write-LogInfo "No WSL distributions found"
-            return @()
-        }
-
-        Write-LogInfo "Existing distributions:"
-        Write-Host ""
-        foreach ($line in $lines) {
-            Write-Host "  $line" -ForegroundColor Gray
-        }
-        Write-Host ""
-
-        return $lines
-    }
-    catch {
-        Write-LogDebug "Error listing distros: $_"
-        return @()
-    }
 }
 
 function Get-NextAvailableDistroName {
@@ -1457,43 +1355,45 @@ function Initialize-WslDistro {
 
             # Convert Windows path to WSL path
             $wslTempDir = "/mnt/" + $tempDir.Substring(0, 1).ToLower() + $tempDir.Substring(2).Replace('\', '/')
+            # Escape single quotes for POSIX shell (handles usernames like O'Connor)
+            $escapedWslTempDir = Get-PosixEscapedPath -Path $wslTempDir
             Write-LogDebug "WSL temp path: $wslTempDir"
 
             # Copy files to /tmp in WSL and fix line endings
             Write-LogDebug "Copying and converting line endings..."
-            wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/setup-wsl-devcontainers.sh' | tr -d '\r' > /tmp/setup-wsl-devcontainers.sh"
+            wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$escapedWslTempDir/setup-wsl-devcontainers.sh' | tr -d '\r' > /tmp/setup-wsl-devcontainers.sh"
             if ($LASTEXITCODE -ne 0) {
                 throw "Failed to copy setup-wsl-devcontainers.sh to WSL"
             }
 
-            wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/install-docker.sh' | tr -d '\r' > /tmp/install-docker.sh"
+            wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$escapedWslTempDir/install-docker.sh' | tr -d '\r' > /tmp/install-docker.sh"
             if ($LASTEXITCODE -ne 0) {
                 throw "Failed to copy install-docker.sh to WSL"
             }
 
             if ($tempGithubPath) {
-                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/install-github-cli.sh' | tr -d '\r' > /tmp/install-github-cli.sh"
+                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$escapedWslTempDir/install-github-cli.sh' | tr -d '\r' > /tmp/install-github-cli.sh"
                 if ($LASTEXITCODE -ne 0) {
                     throw "Failed to copy install-github-cli.sh to WSL"
                 }
             }
 
             if ($tempShellPath) {
-                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/install-shell-customization.sh' | tr -d '\r' > /tmp/install-shell-customization.sh"
+                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$escapedWslTempDir/install-shell-customization.sh' | tr -d '\r' > /tmp/install-shell-customization.sh"
                 if ($LASTEXITCODE -ne 0) {
                     Write-LogWarn "Failed to copy install-shell-customization.sh to WSL"
                 }
             }
 
             if ($tempP10kPath) {
-                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/p10k.zsh' | tr -d '\r' > /tmp/p10k.zsh"
+                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$escapedWslTempDir/p10k.zsh' | tr -d '\r' > /tmp/p10k.zsh"
                 if ($LASTEXITCODE -ne 0) {
                     Write-LogWarn "Failed to copy p10k.zsh to WSL"
                 }
             }
 
             if ($tempZshPluginsPath) {
-                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$wslTempDir/zsh_plugins.txt' | tr -d '\r' > /tmp/zsh_plugins.txt"
+                wsl -d $WslDistroName -u root --cd /tmp -- sh -c "cat '$escapedWslTempDir/zsh_plugins.txt' | tr -d '\r' > /tmp/zsh_plugins.txt"
                 if ($LASTEXITCODE -ne 0) {
                     Write-LogWarn "Failed to copy zsh_plugins.txt to WSL"
                 }
@@ -1903,9 +1803,10 @@ function Initialize-VSCodeTerminalFont {
             }
             else {
                 # Setting doesn't exist - insert after first {
-                # Find position after opening brace, preserving any comments
-                if ($settingsContent -match '^\s*\{') {
-                    $insertPos = $settingsContent.IndexOf('{') + 1
+                # Find position after opening brace, allowing comments to precede it
+                $firstBraceIndex = $settingsContent.IndexOf('{')
+                if ($firstBraceIndex -ge 0) {
+                    $insertPos = $firstBraceIndex + 1
                     $indent = "    "
                     $newSetting = "`n$indent`"$fontSettingName`": `"$fontSettingValue`","
                     $settingsContent = $settingsContent.Insert($insertPos, $newSetting)
