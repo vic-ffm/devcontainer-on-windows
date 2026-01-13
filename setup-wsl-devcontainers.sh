@@ -69,7 +69,7 @@ shopt -s assoc_expand_once
 # Constants
 #-------------------------------------------------------------------------------
 declare -r SCRIPT_NAME="${0##*/}"
-declare -r SCRIPT_VERSION="1.0.0"
+declare -r SCRIPT_VERSION="1.1.0"
 declare -r LOG_FILE="/var/log/wsl-devcontainers-setup.log"
 declare -r LOCK_FILE="/var/lock/wsl-devcontainers-setup.lock"
 

@@ -76,7 +76,7 @@ $ProgressPreference = 'SilentlyContinue'
 # Constants
 #-------------------------------------------------------------------------------
 $script:SCRIPT_NAME = $MyInvocation.MyCommand.Name
-$script:SCRIPT_VERSION = "1.0.0"
+$script:SCRIPT_VERSION = "1.1.0"
 $script:LOG_DIR = "$env:LOCALAPPDATA\DevContainersSetup"
 $script:LOG_FILE = "$script:LOG_DIR\setup.log"
 $script:STATE_REG_PATH = "HKCU:\Software\DevContainersSetup"
