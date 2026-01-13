@@ -586,19 +586,24 @@ function Get-SetupState {
     }
 
     try {
-        $state = @{
-            Phase      = (Get-ItemProperty -Path $script:STATE_REG_PATH -Name "Phase" -ErrorAction SilentlyContinue).Phase
-            Distro     = (Get-ItemProperty -Path $script:STATE_REG_PATH -Name "Distro" -ErrorAction SilentlyContinue).Distro
-            Timestamp  = (Get-ItemProperty -Path $script:STATE_REG_PATH -Name "Timestamp" -ErrorAction SilentlyContinue).Timestamp
-            ScriptPath = (Get-ItemProperty -Path $script:STATE_REG_PATH -Name "ScriptPath" -ErrorAction SilentlyContinue).ScriptPath
-        }
+        $regProps = Get-ItemProperty -Path $script:STATE_REG_PATH -ErrorAction SilentlyContinue
+        if (-not $regProps) { return $null }
 
-        if ($state.Phase -and $state.Distro) {
-            return $state
+        # Safe property access compatible with Strict Mode 3.0
+        $phase = if ($regProps.PSObject.Properties['Phase']) { $regProps.Phase } else { $null }
+        $distro = if ($regProps.PSObject.Properties['Distro']) { $regProps.Distro } else { $null }
+
+        if ($phase -and $distro) {
+            return @{
+                Phase      = $phase
+                Distro     = $distro
+                Timestamp  = if ($regProps.PSObject.Properties['Timestamp']) { $regProps.Timestamp } else { $null }
+                ScriptPath = if ($regProps.PSObject.Properties['ScriptPath']) { $regProps.ScriptPath } else { $null }
+            }
         }
     }
     catch {
-        Write-LogDebug "No valid saved state found"
+        Write-LogDebug "Error reading state: $_"
     }
 
     return $null
@@ -1680,45 +1685,72 @@ function Initialize-WindowsTerminalFont {
         return
     }
 
+    $backupPath = "$wtSettingsPath.backup"
+
     try {
         # Backup existing settings
-        $backupPath = "$wtSettingsPath.backup"
         Copy-Item $wtSettingsPath $backupPath -Force
         Write-LogDebug "Backed up Windows Terminal settings to $backupPath"
 
-        # Read and parse settings
         $settingsContent = Get-Content $wtSettingsPath -Raw -Encoding UTF8
-        $settings = $settingsContent | ConvertFrom-Json
+        $fontName = $script:MESLO_FONT_NAME
 
-        # Ensure profiles.defaults exists
-        if (-not $settings.profiles) {
-            $settings | Add-Member -NotePropertyName profiles -NotePropertyValue ([PSCustomObject]@{}) -Force
-        }
-        if (-not $settings.profiles.defaults) {
-            $settings.profiles | Add-Member -NotePropertyName defaults -NotePropertyValue ([PSCustomObject]@{}) -Force
+        # Try PowerShell 7.3+ JSON with comments support first
+        if ($PSVersionTable.PSVersion.Major -ge 7 -and $PSVersionTable.PSVersion.Minor -ge 3) {
+            try {
+                $settings = $settingsContent | ConvertFrom-Json -AllowComments
+
+                # Ensure profiles.defaults exists using safe property access
+                if (-not $settings.PSObject.Properties['profiles']) {
+                    $settings | Add-Member -NotePropertyName profiles -NotePropertyValue ([PSCustomObject]@{}) -Force
+                }
+                if (-not $settings.profiles.PSObject.Properties['defaults']) {
+                    $settings.profiles | Add-Member -NotePropertyName defaults -NotePropertyValue ([PSCustomObject]@{}) -Force
+                }
+
+                # Set font configuration (v1.10+ style with font object)
+                $fontConfig = [PSCustomObject]@{ face = $fontName }
+
+                if ($settings.profiles.defaults.PSObject.Properties['font']) {
+                    $settings.profiles.defaults.font | Add-Member -NotePropertyName face -NotePropertyValue $fontName -Force
+                }
+                else {
+                    $settings.profiles.defaults | Add-Member -NotePropertyName font -NotePropertyValue $fontConfig -Force
+                }
+
+                $settingsJson = $settings | ConvertTo-Json -Depth 10
+                Set-Content -Path $wtSettingsPath -Value $settingsJson -Encoding UTF8
+                Write-LogSuccess "Windows Terminal configured to use $fontName"
+                return
+            }
+            catch {
+                Write-LogDebug "PowerShell 7.3+ JSON parsing failed, falling back to text-based: $_"
+            }
         }
 
-        # Set font configuration (v1.10+ style with font object)
-        $fontConfig = [PSCustomObject]@{
-            face = $script:MESLO_FONT_NAME
-        }
+        # Text-based approach for JSONC compatibility (PowerShell 5.1 and 7.0-7.2)
+        # Windows Terminal settings.json commonly contains comments which break ConvertFrom-Json
+        # Pattern matches "face" : "value" within a "font" block (handles whitespace variations)
+        $fontFacePattern = '("font"\s*:\s*\{[^}]*"face"\s*:\s*")([^"]*)'
 
-        if ($settings.profiles.defaults.font) {
-            $settings.profiles.defaults.font | Add-Member -NotePropertyName face -NotePropertyValue $script:MESLO_FONT_NAME -Force
+        if ($settingsContent -match $fontFacePattern) {
+            # Update existing font face value
+            $settingsContent = $settingsContent -replace $fontFacePattern, "`${1}$fontName"
+            Set-Content -Path $wtSettingsPath -Value $settingsContent -Encoding UTF8
+            Write-LogSuccess "Windows Terminal font updated to $fontName"
         }
         else {
-            $settings.profiles.defaults | Add-Member -NotePropertyName font -NotePropertyValue $fontConfig -Force
+            # No existing font configuration found
+            # Inserting nested JSON structures via regex is fragile and could corrupt the file
+            Write-LogWarn "Windows Terminal font configuration not found in settings"
+            Write-LogInfo "To configure manually:"
+            Write-LogInfo "  1. Open Windows Terminal Settings (Ctrl+,)"
+            Write-LogInfo "  2. Go to: Profiles > Defaults > Appearance"
+            Write-LogInfo "  3. Set Font face to: $fontName"
         }
-
-        # Write back with proper formatting
-        $settingsJson = $settings | ConvertTo-Json -Depth 10
-        Set-Content -Path $wtSettingsPath -Value $settingsJson -Encoding UTF8
-
-        Write-LogSuccess "Windows Terminal configured to use $($script:MESLO_FONT_NAME)"
     }
     catch {
         Write-LogWarn "Failed to configure Windows Terminal font: $_"
-        # Restore backup if it exists
         if (Test-Path $backupPath) {
             Copy-Item $backupPath $wtSettingsPath -Force
             Write-LogDebug "Restored Windows Terminal settings from backup"
