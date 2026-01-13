@@ -474,6 +474,9 @@ function Test-WslFileTransferIntegrity {
     <#
     .SYNOPSIS
     Verifies a file was transferred to WSL without truncation by comparing sizes.
+    .DESCRIPTION
+    Accounts for CR characters (0x0D) that are stripped during transfer via tr -d '\r'.
+    This ensures the integrity check works correctly for both LF and CRLF source files.
     .PARAMETER SourcePath
     The Windows source file path.
     .PARAMETER WslPath
@@ -493,7 +496,18 @@ function Test-WslFileTransferIntegrity {
     )
 
     $fileName = Split-Path -Leaf $SourcePath
-    $sourceSize = (Get-Item $SourcePath).Length
+
+    # Read source file as bytes to accurately count CR characters
+    $sourceBytes = [System.IO.File]::ReadAllBytes($SourcePath)
+
+    # Count CR bytes (0x0D) that tr -d '\r' will strip during transfer
+    $crCount = 0
+    foreach ($byte in $sourceBytes) {
+        if ($byte -eq 0x0D) { $crCount++ }
+    }
+
+    # Expected size is original minus stripped CRs
+    $expectedSize = $sourceBytes.Length - $crCount
 
     $sizeOutput = wsl -d $Distro -u root --cd /tmp -- stat -c '%s' $WslPath 2>&1
     $transferredSize = ($sizeOutput | Out-String).Trim() -replace '\x00', '' -replace '\r', ''
@@ -502,11 +516,16 @@ function Test-WslFileTransferIntegrity {
         throw "Could not verify file transfer: stat failed for $WslPath (exit code: $LASTEXITCODE)"
     }
 
-    if ([long]$transferredSize -ne $sourceSize) {
-        throw "File integrity check failed: $fileName size mismatch (source: $sourceSize bytes, transferred: $transferredSize bytes)"
+    if ([long]$transferredSize -ne $expectedSize) {
+        throw "File integrity check failed: $fileName size mismatch (expected: $expectedSize bytes, got: $transferredSize bytes)"
     }
 
-    Write-LogDebug "Verified transfer: $fileName ($sourceSize bytes)"
+    if ($crCount -gt 0) {
+        Write-LogDebug "Verified transfer: $fileName ($expectedSize bytes, stripped $crCount CR chars)"
+    } else {
+        Write-LogDebug "Verified transfer: $fileName ($expectedSize bytes)"
+    }
+
     return $true
 }
 
@@ -946,6 +965,63 @@ function Test-WSL2Enabled {
     }
 }
 
+function Initialize-Wsl2DefaultVersion {
+    <#
+    .SYNOPSIS
+    Initializes WSL2 as the default version with automatic kernel update on failure.
+    .DESCRIPTION
+    Attempts to set WSL2 as default. If it fails (often due to missing kernel),
+    automatically runs wsl --update and retries. Provides clear remediation steps
+    if all attempts fail.
+    .OUTPUTS
+    Returns $true if WSL2 is configured successfully, $false on failure.
+    #>
+
+    if ($DryRun) {
+        Write-LogInfo "[DRY-RUN] Would set WSL2 as default version"
+        return $true
+    }
+
+    Write-LogDebug "Setting WSL2 as default version..."
+    $null = wsl --set-default-version 2 2>&1
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-LogDebug "WSL2 set as default successfully"
+        return $true
+    }
+
+    $firstExitCode = $LASTEXITCODE
+    Write-LogWarn "Failed to set WSL2 as default (exit code: $firstExitCode)"
+    Write-LogInfo "Attempting to update WSL kernel..."
+
+    # Try wsl --update to install/update kernel component
+    $updateOutput = wsl --update 2>&1 | Out-String
+    Write-LogDebug "WSL update output: $($updateOutput.Trim())"
+
+    Start-Sleep -Seconds 2
+
+    # Retry setting WSL2 as default
+    Write-LogInfo "Retrying WSL2 default configuration..."
+    $null = wsl --set-default-version 2 2>&1
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-LogSuccess "WSL2 configured after kernel update"
+        return $true
+    }
+
+    # Final failure - provide remediation steps
+    Write-LogError "Failed to configure WSL2 as default after kernel update"
+    Write-LogError "Exit code: $LASTEXITCODE"
+    Write-LogError ""
+    Write-LogError "Manual remediation steps:"
+    Write-LogError "  1. Run: wsl --update"
+    Write-LogError "  2. Run: wsl --set-default-version 2"
+    Write-LogError "  3. If still failing, download kernel: https://aka.ms/wsl2kernel"
+    Write-LogError "  4. Re-run this script after completing above steps"
+
+    return $false
+}
+
 function Enable-WSL2Feature {
     Write-LogStep "1/7" "Enabling WSL2 features"
 
@@ -956,8 +1032,8 @@ function Enable-WSL2Feature {
         Write-LogSuccess "WSL2 features already enabled"
 
         # Ensure WSL2 is set as default version
-        Invoke-WithDryRun -Description "Set WSL2 as default" -ScriptBlock {
-            $null = wsl --set-default-version 2 2>$null
+        if (-not (Initialize-Wsl2DefaultVersion)) {
+            Exit-WithError "Could not configure WSL2 as default version" $script:EXIT_WSL_FAILED
         }
 
         return $false  # No reboot needed
@@ -980,8 +1056,12 @@ function Enable-WSL2Feature {
     }
 
     # Set WSL2 as default
-    Invoke-WithDryRun -Description "Set WSL2 as default" -ScriptBlock {
-        $null = wsl --set-default-version 2 2>$null
+    if (-not (Initialize-Wsl2DefaultVersion)) {
+        # If reboot is needed anyway, this failure is expected - kernel installs after reboot
+        if (-not $needsReboot) {
+            Exit-WithError "Could not configure WSL2 as default version" $script:EXIT_WSL_FAILED
+        }
+        Write-LogWarn "WSL2 default version will be configured after reboot"
     }
 
     if ($needsReboot -and -not $DryRun) {
