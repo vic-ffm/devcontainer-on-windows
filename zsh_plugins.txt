@@ -14,7 +14,7 @@
 getantidote/use-omz
 ohmyzsh/ohmyzsh path:lib
 
-# OMZ Core Plugins (10) - Immediate
+# OMZ Core Plugins (9) - Immediate
 ohmyzsh/ohmyzsh path:plugins/git
 ohmyzsh/ohmyzsh path:plugins/debian
 ohmyzsh/ohmyzsh path:plugins/z
@@ -23,7 +23,6 @@ ohmyzsh/ohmyzsh path:plugins/history
 ohmyzsh/ohmyzsh path:plugins/colored-man-pages
 ohmyzsh/ohmyzsh path:plugins/copypath
 ohmyzsh/ohmyzsh path:plugins/copyfile
-ohmyzsh/ohmyzsh path:plugins/fzf
 ohmyzsh/ohmyzsh path:plugins/systemd
 
 # OMZ Dev Tool Plugins (6) - Deferred for faster startup

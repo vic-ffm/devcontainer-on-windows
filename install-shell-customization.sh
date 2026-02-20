@@ -108,6 +108,7 @@ declare -ra REQUIRED_COMMANDS=(
 declare -ra SHELL_PACKAGES=(
   zsh
   fzf
+  fd-find
   git
 )
 
@@ -730,7 +731,7 @@ check_network() {
 # Installation Functions
 #-------------------------------------------------------------------------------
 install_zsh() {
-  log_step "1/5" "Installing Zsh"
+  log_step "1/6" "Installing Zsh"
 
   # Check if already installed
   # shellcheck disable=SC2310  # Intentional: idempotency check in conditional
@@ -757,7 +758,7 @@ install_zsh() {
 }
 
 install_fzf() {
-  log_step "2/5" "Installing fzf"
+  log_step "2/6" "Installing fzf"
 
   # Check if already installed
   # shellcheck disable=SC2310  # Intentional: idempotency check in conditional
@@ -783,8 +784,37 @@ install_fzf() {
   fi
 }
 
+install_fd() {
+  log_step "3/6" "Installing fd"
+
+  # Check if already installed
+  # shellcheck disable=SC2310  # Intentional: idempotency check in conditional
+  if has_command fdfind && is_installed fd-find; then
+    local fd_ver
+    fd_ver="$(fdfind --version 2>/dev/null)" || fd_ver="unknown"
+    log_success "fd already installed: ${fd_ver}"
+    return 0
+  fi
+
+  log_info "Installing fd-find package..."
+  execute apt_install fd-find
+
+  # Verify installation
+  if [[ ${DRY_RUN} != true ]]; then
+    # shellcheck disable=SC2310  # Intentional: die terminates on failure
+    has_command fdfind || die "fd-find installation failed" "${EXIT_INSTALL_FAILED}"
+    # Debian installs as "fdfind"; symlink to the standard name
+    execute ln -sf /usr/bin/fdfind /usr/local/bin/fd
+    local fd_ver
+    fd_ver="$(fd --version 2>/dev/null)" || fd_ver="unknown"
+    log_success "fd installed: ${fd_ver}"
+  else
+    log_success "[DRY-RUN] fd would be installed"
+  fi
+}
+
 install_antidote() {
-  log_step "3/5" "Installing Antidote plugin manager"
+  log_step "4/6" "Installing Antidote plugin manager"
 
   if [[ -d ${ANTIDOTE_DIR} ]]; then
     log_success "Antidote already installed at ${ANTIDOTE_DIR}"
@@ -806,7 +836,7 @@ install_antidote() {
 }
 
 install_mise() {
-  log_step "4/5" "Installing mise (version manager)"
+  log_step "5/6" "Installing mise (version manager)"
 
   # Check if already installed
   if [[ -f ${MISE_BIN} ]]; then
@@ -859,7 +889,7 @@ install_mise() {
 }
 
 configure_shell() {
-  log_step "5/5" "Configuring shell environment"
+  log_step "6/6" "Configuring shell environment"
 
   # shellcheck disable=SC2312  # Intentional: file check below handles failure gracefully
   local -r script_dir="$(dirname "$(readlink -f "$0")")"
@@ -939,12 +969,11 @@ ZSH_HIGHLIGHT_HIGHLIGHTERS=(main brackets)
 ZSH_HIGHLIGHT_MAXLENGTH=512
 
 # fzf (Ctrl+R history, Ctrl+T files, Alt+C directories)
+eval "$(fzf --zsh)"
 export FZF_DEFAULT_OPTS="--height 40% --layout=reverse --border --info=inline"
-if command -v fd &>/dev/null; then
-  export FZF_DEFAULT_COMMAND="fd --type f --hidden --follow --exclude .git"
-  export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
-  export FZF_ALT_C_COMMAND="fd --type d --hidden --follow --exclude .git"
-fi
+export FZF_DEFAULT_COMMAND="fd --type f --hidden --follow --exclude .git"
+export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+export FZF_ALT_C_COMMAND="fd --type d --hidden --follow --exclude .git"
 
 # z (directory jumping)
 export ZSHZ_DATA="${HOME}/.z"
@@ -1365,6 +1394,7 @@ print_removal_summary() {
   log_info "NOT removed (by design):"
   log_info "  - Zsh package (may be used by other users)"
   log_info "  - fzf package (may be used by other applications)"
+  log_info "  - fd-find package (may be used by other applications)"
   log_info "  - Git (system dependency)"
   log_info ""
   log_info "Log file: ${LOG_FILE}"
@@ -1454,7 +1484,7 @@ verify_installation() {
   fi
 
   local -i passed=0
-  local -i total=6
+  local -i total=7
 
   # 1. Zsh installed
   # shellcheck disable=SC2310  # Intentional: verification check in conditional
@@ -1478,7 +1508,18 @@ verify_installation() {
     log_error "fzf: not installed"
   fi
 
-  # 3. Antidote installed
+  # 3. fd installed
+  # shellcheck disable=SC2310  # Intentional: verification check in conditional
+  if has_command fd; then
+    local fd_ver
+    fd_ver="$(fd --version 2>/dev/null)" || fd_ver="unknown"
+    log_success "fd: ${fd_ver}"
+    ((passed++))
+  else
+    log_error "fd: not installed"
+  fi
+
+  # 4. Antidote installed
   if [[ -d ${ANTIDOTE_DIR} ]]; then
     log_success "Antidote: installed"
     ((passed++))
@@ -1486,7 +1527,7 @@ verify_installation() {
     log_error "Antidote: not found"
   fi
 
-  # 4. Plugin configuration exists
+  # 5. Plugin configuration exists
   if [[ -f ${ZSH_PLUGINS_FILE} ]]; then
     log_success "Plugin config: ${ZSH_PLUGINS_FILE}"
     ((passed++))
@@ -1494,7 +1535,7 @@ verify_installation() {
     log_error "Plugin config: not found"
   fi
 
-  # 5. mise installed
+  # 6. mise installed
   if [[ -f ${MISE_BIN} ]]; then
     local mise_ver
     mise_ver=$(sudo -u "${TARGET_USER}" "${MISE_BIN}" --version 2>/dev/null) || mise_ver="unknown"
@@ -1506,7 +1547,7 @@ verify_installation() {
     ((passed++))
   fi
 
-  # 6. Default shell is zsh
+  # 7. Default shell is zsh
   local current_shell
   current_shell=$(getent passwd "${TARGET_USER}" | cut -d: -f7)
   if [[ ${current_shell} == *zsh ]]; then
@@ -1534,12 +1575,13 @@ print_summary() {
   log_info "User:          ${TARGET_USER}"
   log_info "Shell:         zsh with Antidote + Powerlevel10k"
   log_info "Theme:         powerlevel10k (ASCII mode)"
-  log_info "Plugins:       21 total (see below)"
+  log_info "Tools:         fzf, fd, mise"
+  log_info "Plugins:       20 total (see below)"
   log_info "Log file:      ${LOG_FILE}"
   log_info ""
-  log_info "Installed plugins (21 total):"
+  log_info "Installed plugins (20 total):"
   log_info "  Core (immediate):     git, debian, z, sudo, history, colored-man-pages,"
-  log_info "                        copypath, copyfile, fzf, systemd"
+  log_info "                        copypath, copyfile, systemd"
   log_info "  Dev tools (deferred): docker, deno, bun, rust, azure, gh"
   log_info "  External:             zsh-autosuggestions, zsh-syntax-highlighting,"
   log_info "                        powerlevel10k"
@@ -1582,15 +1624,16 @@ ${COLORS[bold]}GENERAL OPTIONS:${COLORS[reset]}
 ${COLORS[bold]}WHAT GETS INSTALLED:${COLORS[reset]}
     - Zsh (from apt)
     - fzf (from apt)
+    - fd-find (from apt, symlinked as fd)
     - Antidote plugin manager (from GitHub)
     - Powerlevel10k theme (ASCII mode)
-    - 21 plugins via Antidote (see below)
+    - 20 plugins via Antidote (see below)
     - mise version manager (no default tools)
     - Configured .zshrc with optimal settings
 
-${COLORS[bold]}PLUGINS ENABLED (21 total):${COLORS[reset]}
+${COLORS[bold]}PLUGINS ENABLED (20 total):${COLORS[reset]}
     Core (immediate): git, debian, z, sudo, history, colored-man-pages,
-                      copypath, copyfile, fzf, systemd
+                      copypath, copyfile, systemd
     Dev (deferred):   docker, deno, bun, rust, azure, gh
     External:         zsh-autosuggestions, zsh-syntax-highlighting, powerlevel10k
     Optional:         zsh-autocomplete (disabled by default, enable in ~/.zsh_plugins.txt)
@@ -1717,6 +1760,7 @@ main() {
   # Installation
   install_zsh
   install_fzf
+  install_fd
   install_antidote
   install_mise
   configure_shell
